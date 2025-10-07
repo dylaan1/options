@@ -38,11 +38,8 @@ class OptionsChainViewer(ttk.Frame):
         "open_interest",
     )
 
-    def __init__(self, parent, on_select: Callable[[pd.Series], None] | None = None):
+    def __init__(self, parent):
         super().__init__(parent, padding=PAD)
-
-        self._on_select = on_select
-        self._data = pd.DataFrame()
 
         self._last_update = tk.StringVar(value="")
 
@@ -67,39 +64,20 @@ class OptionsChainViewer(ttk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        self.tree.bind("<<TreeviewSelect>>", self._handle_select)
-
     def update_from_dataframe(self, df: pd.DataFrame, timestamp: str | None = None) -> None:
         self.tree.delete(*self.tree.get_children())
-        self._data = df.reset_index(drop=True)
         if df.empty:
             self._last_update.set("No data")
             return
 
-        for idx, row in self._data.iterrows():
+        for _, row in df.iterrows():
             values = [row.get(col, "") for col in self.columns]
-            self.tree.insert("", "end", iid=str(idx), values=values)
+            self.tree.insert("", "end", values=values)
 
         if timestamp:
             self._last_update.set(f"Updated {timestamp}")
         else:
             self._last_update.set("Updated")
-
-    def get_selected_row(self) -> pd.Series | None:
-        selection = self.tree.selection()
-        if not selection:
-            return None
-        idx = int(selection[0])
-        if 0 <= idx < len(self._data):
-            return self._data.iloc[idx]
-        return None
-
-    def _handle_select(self, _event) -> None:
-        if self._on_select is None:
-            return
-        row = self.get_selected_row()
-        if row is not None:
-            self._on_select(row)
 
 class SimUI(tk.Tk):
     def __init__(self):
@@ -110,7 +88,6 @@ class SimUI(tk.Tk):
         self.data_provider = create_data_provider(self.data_settings)
         self._chain_handle: QuoteStreamHandle | None = None
         self._latest_chain: pd.DataFrame | None = None
-        self._latest_underlying_price: float | None = None
         self._build_notebook()
 
     def _build_notebook(self):
@@ -224,12 +201,9 @@ class SimUI(tk.Tk):
         controls.pack(fill="x", pady=(0, PAD))
         ttk.Button(controls, text="Start Stream", command=self._start_chain_stream).pack(side="left")
         ttk.Button(controls, text="Stop Stream", command=self._stop_chain_stream).pack(side="left", padx=(PAD, 0))
-        ttk.Button(controls, text="Use Selected Contract", command=self._apply_selected_contract).pack(
-            side="left", padx=(PAD, 0)
-        )
         ttk.Button(controls, text="Copy Last Chain", command=self._copy_chain_to_clipboard).pack(side="right")
 
-        self.chain_view = OptionsChainViewer(mdat, on_select=self._handle_chain_select)
+        self.chain_view = OptionsChainViewer(mdat)
         self.chain_view.pack(fill="both", expand=True)
 
         # --- Buttons
@@ -381,9 +355,6 @@ class SimUI(tk.Tk):
     def _handle_chain_update(self, df: pd.DataFrame) -> None:
         timestamp = time.strftime("%H:%M:%S")
         self._latest_chain = df.copy()
-        self._latest_underlying_price = (
-            df.attrs.get("underlying_price") if hasattr(df, "attrs") else None
-        )
 
         def _update() -> None:
             self.chain_view.update_from_dataframe(self._latest_chain, timestamp)
@@ -409,72 +380,6 @@ class SimUI(tk.Tk):
             messagebox.showinfo("Copy option chain", "Latest option chain copied to clipboard (CSV format).")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Copy option chain", f"Failed to copy option chain:\n{exc}")
-
-    def _handle_chain_select(self, row: pd.Series) -> None:
-        # Light preview when the user changes selection; no auto-write until asked.
-        if pd.notna(row.get("mark")):
-            self.var_entry.set(float(row["mark"]))
-        if pd.notna(row.get("strike")):
-            self.var_strike.set(float(row["strike"]))
-
-    def _apply_selected_contract(self) -> None:
-        if self._latest_chain is None or self._latest_chain.empty:
-            messagebox.showinfo("Use option", "Stream an option chain before selecting a contract.")
-            return
-
-        row = self.chain_view.get_selected_row()
-        if row is None:
-            messagebox.showinfo("Use option", "Select a contract in the option chain table first.")
-            return
-
-        symbol = row.get("symbol")
-        if isinstance(symbol, str) and symbol:
-            self.var_symbol.set(symbol.upper())
-
-        option_type = row.get("option_type")
-        if isinstance(option_type, str) and option_type:
-            self.var_option_type.set(option_type.lower())
-
-        expiration = row.get("expiration")
-        if isinstance(expiration, str) and expiration:
-            self.var_expiration.set(expiration)
-
-        multiplier = row.get("multiplier")
-        if pd.notna(multiplier):
-            try:
-                self.var_multiplier.set(int(multiplier))
-            except Exception:  # noqa: BLE001 - default to current multiplier if conversion fails
-                pass
-
-        strike = row.get("strike")
-        if pd.notna(strike):
-            self.var_strike.set(float(strike))
-
-        mark = row.get("mark")
-        if pd.notna(mark):
-            self.var_entry.set(float(mark))
-        elif pd.notna(row.get("last")):
-            self.var_entry.set(float(row["last"]))
-
-        dte = row.get("dte")
-        if pd.notna(dte):
-            self.var_dte.set(int(dte))
-
-        iv = row.get("iv")
-        if pd.notna(iv) and iv > 0:
-            self.var_iv_mode.set("fixed")
-            self.var_iv_fixed.set(float(iv))
-
-        underlying = row.get("underlying_price")
-        if pd.isna(underlying) and self._latest_underlying_price is not None:
-            underlying = self._latest_underlying_price
-        if pd.notna(underlying):
-            self.var_spot.set(float(underlying))
-
-        messagebox.showinfo(
-            "Use option",
-            "Selected contract details copied into the simulation form. Adjust any remaining fields as needed before running.",
-        )
 
     # ======= Helpers =======
     def _add_labeled_entry(self, parent, text, var, row, col):

@@ -136,15 +136,11 @@ class MockDataProvider:
                     "rho": round(float(self._rng.normal(0.05, 0.01)), 4),
                     "volume": int(abs(self._rng.normal(250, 120))),
                     "open_interest": int(abs(self._rng.normal(1200, 320))),
-                    "underlying_price": round(float(spot), 2),
-                    "multiplier": 100,
                 }
             )
 
         df = pd.DataFrame(rows)
-        df = df.sort_values("strike").reset_index(drop=True)
-        df.attrs["underlying_price"] = float(spot)
-        return df
+        return df.sort_values("strike").reset_index(drop=True)
 
     def stream_option_chain(
         self,
@@ -188,41 +184,9 @@ class SchwabDataProvider:
 
     def get_spot(self, symbol: str) -> float:
         quote = self.client.get_quote(symbol)
-        # Schwab market data responses may be nested under symbol keys or provide
-        # historical candles; probe a few known layouts before giving up.
-        candidates = []
-        if isinstance(quote, dict):
-            for key in (
-                "mark",
-                "markPrice",
-                "last",
-                "lastPrice",
-                "lastTrade",
-                "close",
-                "previousClose",
-                "regularMarketLastPrice",
-            ):
-                value = quote.get(key)
-                if value is not None:
-                    candidates.append(value)
-
-            if "quote" in quote and isinstance(quote["quote"], dict):
-                nested = quote["quote"]
-                for key in ("mark", "lastPrice", "close", "regularMarketLastPrice"):
-                    value = nested.get(key)
-                    if value is not None:
-                        candidates.append(value)
-
-            if "candles" in quote and quote["candles"]:
-                last_candle = quote["candles"][-1]
-                for key in ("close", "last", "lastPrice"):
-                    value = last_candle.get(key)
-                    if value is not None:
-                        candidates.append(value)
-
-        if candidates:
-            return float(candidates[0])
-
+        for key in ("mark", "lastPrice", "lastTrade", "close", "regularMarketLastPrice"):
+            if key in quote and quote[key] is not None:
+                return float(quote[key])
         raise KeyError(f"Quote response missing price fields for {symbol}: {quote}")
 
     def get_option_chain(
@@ -307,11 +271,11 @@ class SchwabDataProvider:
                             "dte": dte,
                             "option_type": option_type,
                             "strike": float(contract.get("strikePrice", strike)),
-                            "bid": contract.get("bidPrice", contract.get("bid", 0.0)),
-                            "ask": contract.get("askPrice", contract.get("ask", 0.0)),
-                            "mark": contract.get("markPrice", contract.get("mark", 0.0)),
-                            "last": contract.get("lastPrice", contract.get("last", 0.0)),
-                            "iv": (contract.get("volatility") or 0.0) / 100.0,
+                            "bid": contract.get("bid", 0.0),
+                            "ask": contract.get("ask", 0.0),
+                            "mark": contract.get("mark", 0.0),
+                            "last": contract.get("last", 0.0),
+                            "iv": contract.get("volatility", 0.0) / 100.0,
                             "delta": contract.get("delta", 0.0),
                             "gamma": contract.get("gamma", 0.0),
                             "theta": contract.get("theta", 0.0),
@@ -319,23 +283,10 @@ class SchwabDataProvider:
                             "rho": contract.get("rho", 0.0),
                             "volume": contract.get("totalVolume", 0),
                             "open_interest": contract.get("openInterest", 0),
-                            "multiplier": contract.get("multiplier", raw.get("multiplier", 100)),
-                            "underlying_price": raw.get("underlyingPrice")
-                            or contract.get("underlyingPrice")
-                            or (raw.get("underlying", {}) or {}).get("mark"),
-                            "quote_time": contract.get("quoteTimeInLong")
-                            or contract.get("quoteTime"),
                         }
                     )
 
-        df = pd.DataFrame(rows)
-        if "underlyingPrice" in raw:
-            df.attrs["underlying_price"] = raw.get("underlyingPrice")
-        elif "underlying" in raw and isinstance(raw["underlying"], dict):
-            underlying_mark = raw["underlying"].get("mark") or raw["underlying"].get("last")
-            if underlying_mark is not None:
-                df.attrs["underlying_price"] = underlying_mark
-        return df
+        return pd.DataFrame(rows)
 
 
 def create_data_provider(
@@ -351,18 +302,7 @@ def create_data_provider(
         return MockDataProvider(seed=seed)
     if backend == "schwab":
         if schwab_client is None:
-            if config.schwab is None:
-                raise ValueError(
-                    "Schwab configuration required when backend='schwab' and no client provided"
-                )
-            try:
-                from .schwab import SchwabRESTClient
-            except ImportError as exc:  # pragma: no cover - optional dependency guard
-                raise ImportError(
-                    "Schwab backend requires the optional 'requests' and 'cryptography' packages"
-                ) from exc
-
-            schwab_client = SchwabRESTClient(config.schwab)
+            raise ValueError("schwab_client must be provided when backend='schwab'")
         return SchwabDataProvider(client=schwab_client)
 
     raise ValueError(f"Unknown data provider backend: {config.backend}")

@@ -3,6 +3,14 @@ from dataclasses import dataclass
 
 @dataclass
 class SimConfig:
+    """Simulation inputs for a single option contract scenario."""
+
+    # Instrument metadata
+    symbol: str                  = "GLD"
+    option_type: str             = "call"      # "call" or "put"
+    expiration: str | None       = None        # ISO date string when available
+    contract_multiplier: int     = 100
+
     # Market & contract
     spot: float                  = 364.38
     strike: float                = 370.0

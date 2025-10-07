@@ -5,6 +5,7 @@ import os
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
+from typing import Callable
 
 import pandas as pd
 import matplotlib.pyplot as plt

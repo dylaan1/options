@@ -3,8 +3,9 @@
 Below is the prioritized queue of work items to continue generalizing the simulator. Check each item off as it is completed. Use the **View task** links to jump directly to detailed notes for that task.
 
 - [x] Task 1: Data provider abstraction ([View task](#task-1-data-provider-abstraction))
-- [ ] Task 2: Live volatility integration ([View task](#task-2-live-volatility-integration))
-- [ ] Task 3: CLI/UX polish ([View task](#task-3-cliux-polish))
+- [ ] Task 2: Simulation input plumbing ([View task](#task-2-simulation-input-plumbing))
+- [ ] Task 3: Live volatility integration ([View task](#task-3-live-volatility-integration))
+- [ ] Task 4: CLI/UX polish ([View task](#task-4-cliux-polish))
 
 ---
 
@@ -21,7 +22,25 @@ Below is the prioritized queue of work items to continue generalizing the simula
 
 ---
 
-## Task 2: Live volatility integration
+## Task 2: Simulation input plumbing
+- **Objective:** Let users select a contract from the live option chain and have the simulator forms auto-populate with that contract's strike, expiration, mark price, implied volatility, and DTE.
+- **Key information needed:**
+  - Preferred UI gesture for selecting a contract (row click, double-click, or a dedicated "Use in simulation" button).
+  - Mapping between chain columns and simulation inputs (e.g., `markPrice` → entry, `bidPrice`/`askPrice` averages, which IV field to trust, multiplier handling).
+  - Fallback behavior when the chain omits a value (use manual overrides, compute DTE from expiration, prompt the user, etc.).
+  - Whether batch runs should also accept auto-populated rows or only single-run forms.
+- **Implementation steps:**
+  - Wire the `OptionsChainViewer` selection callback to capture the selected row's data.
+  - Normalize the row into a `SimConfig`-compatible payload, applying any fallbacks.
+  - Update the single-run form fields in the UI (and CLI defaults where appropriate).
+  - Record the auto-populated metadata in simulation summaries for auditability.
+- **Status:** 🚧 Pending clarification from the user on the interaction flow and fallback rules noted above.
+
+[View task](#next-tasks)
+
+---
+
+## Task 3: Live volatility integration
 - **Objective:** Replace fixed IV inputs with real-time implied volatility from the option chain, while retaining overrides for scenario testing.
 - **Key steps:**
   - Extend the configuration to accept per-contract IV sourced from the data provider.
@@ -33,7 +52,7 @@ Below is the prioritized queue of work items to continue generalizing the simula
 
 ---
 
-## Task 3: CLI/UX polish
+## Task 4: CLI/UX polish
 - **Objective:** Streamline the CLI so users can select contracts interactively and review scenario outputs across multiple tickers.
 - **Key steps:**
   - Add commands/subcommands to list available expirations/strikes pulled from the data provider.

@@ -1,8 +1,31 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
+
+
+@dataclass
+class DataProviderConfig:
+    """Runtime settings for the market data provider."""
+
+    backend: str = "mock"
+    poll_interval: float = 5.0
+    params: Dict[str, Any] = field(default_factory=dict)
+    auto_start_stream: bool = True
+    default_symbol: Optional[str] = "GLD"
+    default_option_type: str = "call"
+    default_expiration: Optional[str] = None
 
 @dataclass
 class SimConfig:
+    """Simulation inputs for a single option contract scenario."""
+
+    # Instrument metadata
+    symbol: str                  = "GLD"
+    option_type: str             = "call"      # "call" or "put"
+    expiration: str | None       = None        # ISO date string when available
+    contract_multiplier: int     = 100
+    data_provider: DataProviderConfig = field(default_factory=DataProviderConfig)
+
     # Market & contract
     spot: float                  = 364.38
     strike: float                = 370.0

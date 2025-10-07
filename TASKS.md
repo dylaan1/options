@@ -2,7 +2,7 @@
 
 Below is the prioritized queue of work items to continue generalizing the simulator. Check each item off as it is completed. Use the **View task** links to jump directly to detailed notes for that task.
 
-- [ ] Task 1: Data provider abstraction ([View task](#task-1-data-provider-abstraction))
+- [x] Task 1: Data provider abstraction ([View task](#task-1-data-provider-abstraction))
 - [ ] Task 2: Live volatility integration ([View task](#task-2-live-volatility-integration))
 - [ ] Task 3: CLI/UX polish ([View task](#task-3-cliux-polish))
 
@@ -15,6 +15,8 @@ Below is the prioritized queue of work items to continue generalizing the simula
   - Implement a Schwab-backed provider that authenticates, requests the option chain, and maps results to the simulator schema.
   - Provide an in-memory/mock provider for unit tests and demos.
   - Add configuration hooks so the simulator selects a provider at runtime.
+- **Status:** ✅ Framework in place with `MarketDataProvider` protocol, Schwab adapter skeleton, polling stream handle, mock generator, and UI integration that streams the chain into a live table. Next up: wire the real Schwab client implementation and credential flow.
+
 
 [View task](#next-tasks)
 

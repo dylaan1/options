@@ -9,8 +9,18 @@ from .config import SimConfig
 from .sim import simulate
 from .plotting import plot_results
 
+_OPTION_CODE = {"call": "C", "put": "P"}
+
+
+def _option_code(option_type: str) -> str:
+    return _OPTION_CODE.get(option_type.lower(), option_type.upper())
+
 def parse_args():
-    p = argparse.ArgumentParser(description="GLD Long Call Monte-Carlo (modular).")
+    p = argparse.ArgumentParser(description="Options Monte-Carlo simulator (single contract).")
+    p.add_argument("--symbol", default="GLD", help="underlying symbol")
+    p.add_argument("--option-type", choices=["call"], default="call", help="option contract type")
+    p.add_argument("--expiration", default="", help="expiration date (YYYY-MM-DD)")
+    p.add_argument("--multiplier", type=int, default=100, help="contract multiplier (shares per contract)")
     # Primary knobs
     p.add_argument("--spot", type=float, default=364.38)
     p.add_argument("--strike", type=float, default=370.0)
@@ -61,7 +71,13 @@ def run_one(cfg: SimConfig, out_dir: str, tag: str):
 def main():
     args = parse_args()
 
+    expiration = args.expiration.strip() or None
+
     base = SimConfig(
+        symbol=args.symbol,
+        option_type=args.option_type,
+        expiration=expiration,
+        contract_multiplier=args.multiplier,
         spot=args.spot,
         strike=args.strike,
         dte_calendar=args.dte,
@@ -87,7 +103,7 @@ def main():
         rows = []
         for k in strikes:
             cfg = SimConfig(**{**asdict(base), "strike": k})
-            tag = args.tag or f"GLD_{int(cfg.strike)}C_{cfg.dte_calendar}DTE_{cfg.iv_mode}_tr{cfg.num_trials}"
+            tag = args.tag or f"{cfg.symbol}_{int(cfg.strike)}{_option_code(cfg.option_type)}_{cfg.dte_calendar}DTE_{cfg.iv_mode}_tr{cfg.num_trials}"
             s = run_one(cfg, out_dir, tag)
             s["Scenario"] = tag
             rows.append(s)
@@ -96,7 +112,7 @@ def main():
         comp.to_csv(comp_path, index=False)
         print(f"[Saved] {comp_path}")
     else:
-        tag = args.tag or f"GLD_{int(base.strike)}C_{base.dte_calendar}DTE_{base.iv_mode}_tr{base.num_trials}"
+        tag = args.tag or f"{base.symbol}_{int(base.strike)}{_option_code(base.option_type)}_{base.dte_calendar}DTE_{base.iv_mode}_tr{base.num_trials}"
         run_one(base, out_dir, tag)
 
 if __name__ == "__main__":

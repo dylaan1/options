@@ -5,22 +5,112 @@ import os
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
+from typing import Callable
 
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from .config import SimConfig
+from .config import DataProviderConfig, SimConfig
+from .data_provider import QuoteStreamHandle, create_data_provider
 from .sim import simulate
 
 PAD = 10
 
+
+class OptionsChainViewer(ttk.Frame):
+    """Treeview widget for displaying an option chain DataFrame."""
+
+    columns = (
+        "strike",
+        "option_type",
+        "bid",
+        "ask",
+        "mark",
+        "last",
+        "iv",
+        "delta",
+        "gamma",
+        "theta",
+        "vega",
+        "rho",
+        "volume",
+        "open_interest",
+    )
+
+    def __init__(self, parent, on_select: Callable[[pd.Series], None] | None = None):
+        super().__init__(parent, padding=PAD)
+
+        self._on_select = on_select
+        self._data = pd.DataFrame()
+
+        self._last_update = tk.StringVar(value="")
+
+        header = ttk.Frame(self)
+        header.pack(fill="x", pady=(0, PAD))
+        ttk.Label(header, text="Live Option Chain", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+        ttk.Label(header, textvariable=self._last_update).pack(side="right")
+
+        columns = ("strike", "option_type", "bid", "ask", "mark", "last", "iv",
+                   "delta", "gamma", "theta", "vega", "rho", "volume", "open_interest")
+        self.columns = columns
+
+        self.tree = ttk.Treeview(self, columns=self.columns, show="headings", height=12)
+        for col in self.columns:
+            self.tree.heading(col, text=col.replace("_", " ").title())
+            width = 90 if col not in {"strike", "option_type"} else 80
+            self.tree.column(col, width=width, anchor="center")
+
+        vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.tree.bind("<<TreeviewSelect>>", self._handle_select)
+
+    def update_from_dataframe(self, df: pd.DataFrame, timestamp: str | None = None) -> None:
+        self.tree.delete(*self.tree.get_children())
+        self._data = df.reset_index(drop=True)
+        if df.empty:
+            self._last_update.set("No data")
+            return
+
+        for idx, row in self._data.iterrows():
+            values = [row.get(col, "") for col in self.columns]
+            self.tree.insert("", "end", iid=str(idx), values=values)
+
+        if timestamp:
+            self._last_update.set(f"Updated {timestamp}")
+        else:
+            self._last_update.set("Updated")
+
+    def get_selected_row(self) -> pd.Series | None:
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        idx = int(selection[0])
+        if 0 <= idx < len(self._data):
+            return self._data.iloc[idx]
+        return None
+
+    def _handle_select(self, _event) -> None:
+        if self._on_select is None:
+            return
+        row = self.get_selected_row()
+        if row is not None:
+            self._on_select(row)
+
 class SimUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("GLD Long Call Monte Carlo")
-        self.geometry("940x780")
+        self.title("Options Monte Carlo Simulator")
+        self.geometry("1050x820")
+        self.data_settings = DataProviderConfig()
+        self.data_provider = create_data_provider(self.data_settings)
+        self._chain_handle: QuoteStreamHandle | None = None
+        self._latest_chain: pd.DataFrame | None = None
+        self._latest_underlying_price: float | None = None
         self._build_notebook()
 
     def _build_notebook(self):
@@ -43,6 +133,22 @@ class SimUI(tk.Tk):
     def _build_single_tab(self, root):
         root = ttk.Frame(root, padding=PAD)
         root.pack(fill="both", expand=True)
+
+        default_symbol = self.data_settings.default_symbol or "GLD"
+
+        # --- Instrument ---
+        isec = ttk.LabelFrame(root, text="Instrument", padding=PAD)
+        isec.pack(fill="x", expand=False, pady=(0, PAD))
+
+        self.var_symbol = tk.StringVar(value=default_symbol)
+        self.var_option_type = tk.StringVar(value=self.data_settings.default_option_type)
+        self.var_expiration = tk.StringVar(value=self.data_settings.default_expiration or "")
+        self.var_multiplier = tk.IntVar(value=100)
+
+        self._add_labeled_entry(isec, "Symbol", self.var_symbol, 0, 0)
+        self._add_combo(isec, "Option type", self.var_option_type, ["call", "put"], 0, 1)
+        self._add_labeled_entry(isec, "Expiration (YYYY-MM-DD)", self.var_expiration, 1, 0)
+        self._add_labeled_entry(isec, "Contract multiplier", self.var_multiplier, 1, 1)
 
         # --- Market & Contract
         msec = ttk.LabelFrame(root, text="Market & Contract", padding=PAD)
@@ -110,15 +216,32 @@ class SimUI(tk.Tk):
         self._add_combo(dsec, "μ mode", self.var_mu_mode, ["risk_neutral", "custom"], 0, 0)
         self._add_labeled_entry(dsec, "μ custom (annual)", self.var_mu_custom, 0, 1)
 
+        # --- Live Market Data
+        mdat = ttk.LabelFrame(root, text="Live Market Data", padding=PAD)
+        mdat.pack(fill="both", expand=True, pady=(0, PAD))
+
+        controls = ttk.Frame(mdat)
+        controls.pack(fill="x", pady=(0, PAD))
+        ttk.Button(controls, text="Start Stream", command=self._start_chain_stream).pack(side="left")
+        ttk.Button(controls, text="Stop Stream", command=self._stop_chain_stream).pack(side="left", padx=(PAD, 0))
+        ttk.Button(controls, text="Use Selected Contract", command=self._apply_selected_contract).pack(
+            side="left", padx=(PAD, 0)
+        )
+        ttk.Button(controls, text="Copy Last Chain", command=self._copy_chain_to_clipboard).pack(side="right")
+
+        self.chain_view = OptionsChainViewer(mdat, on_select=self._handle_chain_select)
+        self.chain_view.pack(fill="both", expand=True)
+
         # --- Buttons
         btn_row = ttk.Frame(root, padding=(0, PAD))
         btn_row.pack(fill="x", expand=False)
         ttk.Button(btn_row, text="Run Simulation", command=self._run_single).pack(side="left")
         ttk.Button(btn_row, text="Quit", command=self.destroy).pack(side="right")
 
-        ttk.Label(root, text="Charts appear in a separate Results window. CSVs saved to ./out/").pack(
-            side="bottom", anchor="w"
-        )
+        ttk.Label(root, text="Charts appear in a separate Results window. CSVs saved to ./out/").pack(side="bottom", anchor="w")
+
+        if self.data_settings.auto_start_stream:
+            self.after(200, self._start_chain_stream)
 
     # ======= BATCH TAB =======
     def _build_batch_tab(self, root):
@@ -126,6 +249,20 @@ class SimUI(tk.Tk):
         root.pack(fill="both", expand=True)
 
         # Reuse same-style blocks but with separate variables (so Single and Batch are independent)
+
+        # --- Instrument ---
+        b_inst = ttk.LabelFrame(root, text="Instrument", padding=PAD)
+        b_inst.pack(fill="x", expand=False, pady=(0, PAD))
+
+        self.b_symbol = tk.StringVar(value=self.data_settings.default_symbol or "GLD")
+        self.b_option_type = tk.StringVar(value=self.data_settings.default_option_type)
+        self.b_expiration = tk.StringVar(value=self.data_settings.default_expiration or "")
+        self.b_multiplier = tk.IntVar(value=100)
+
+        self._add_labeled_entry(b_inst, "Symbol", self.b_symbol, 0, 0)
+        self._add_combo(b_inst, "Option type", self.b_option_type, ["call", "put"], 0, 1)
+        self._add_labeled_entry(b_inst, "Expiration (YYYY-MM-DD)", self.b_expiration, 1, 0)
+        self._add_labeled_entry(b_inst, "Contract multiplier", self.b_multiplier, 1, 1)
 
         # --- Market & Contract
         msec = ttk.LabelFrame(root, text="Market & Contract (shared across strikes)", padding=PAD)
@@ -211,6 +348,134 @@ class SimUI(tk.Tk):
             side="bottom", anchor="w"
         )
 
+    # ======= Market data =======
+    def _start_chain_stream(self) -> None:
+        symbol = self.var_symbol.get().strip().upper() or (self.data_settings.default_symbol or "GLD")
+        expiration = self.var_expiration.get().strip() or None
+        option_type = self.var_option_type.get().strip().lower()
+        option_filter = option_type if option_type in {"call", "put"} else None
+
+        params = dict(self.data_settings.params) if self.data_settings.params else {}
+
+        self._stop_chain_stream()
+
+        try:
+            self._chain_handle = self.data_provider.stream_option_chain(
+                symbol=symbol,
+                expiration=expiration,
+                option_type=option_filter,
+                params=params,
+                poll_interval=self.data_settings.poll_interval,
+                on_update=self._handle_chain_update,
+                on_error=self._handle_chain_error,
+            )
+        except Exception as exc:  # noqa: BLE001 - present provider errors to the user
+            self._chain_handle = None
+            messagebox.showerror("Market data", f"Failed to start option chain stream:\n{exc}")
+
+    def _stop_chain_stream(self) -> None:
+        if self._chain_handle is not None:
+            self._chain_handle.stop()
+            self._chain_handle = None
+
+    def _handle_chain_update(self, df: pd.DataFrame) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        self._latest_chain = df.copy()
+        self._latest_underlying_price = (
+            df.attrs.get("underlying_price") if hasattr(df, "attrs") else None
+        )
+
+        def _update() -> None:
+            self.chain_view.update_from_dataframe(self._latest_chain, timestamp)
+
+        self.after(0, _update)
+
+    def _handle_chain_error(self, exc: Exception) -> None:
+        def _show() -> None:
+            messagebox.showerror("Market data stream", str(exc))
+
+        self.after(0, _show)
+        self._stop_chain_stream()
+
+    def _copy_chain_to_clipboard(self) -> None:
+        if self._latest_chain is None or self._latest_chain.empty:
+            messagebox.showinfo("Copy option chain", "No option chain data available yet.")
+            return
+
+        try:
+            csv_text = self._latest_chain.to_csv(index=False)
+            self.clipboard_clear()
+            self.clipboard_append(csv_text)
+            messagebox.showinfo("Copy option chain", "Latest option chain copied to clipboard (CSV format).")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Copy option chain", f"Failed to copy option chain:\n{exc}")
+
+    def _handle_chain_select(self, row: pd.Series) -> None:
+        # Light preview when the user changes selection; no auto-write until asked.
+        if pd.notna(row.get("mark")):
+            self.var_entry.set(float(row["mark"]))
+        if pd.notna(row.get("strike")):
+            self.var_strike.set(float(row["strike"]))
+
+    def _apply_selected_contract(self) -> None:
+        if self._latest_chain is None or self._latest_chain.empty:
+            messagebox.showinfo("Use option", "Stream an option chain before selecting a contract.")
+            return
+
+        row = self.chain_view.get_selected_row()
+        if row is None:
+            messagebox.showinfo("Use option", "Select a contract in the option chain table first.")
+            return
+
+        symbol = row.get("symbol")
+        if isinstance(symbol, str) and symbol:
+            self.var_symbol.set(symbol.upper())
+
+        option_type = row.get("option_type")
+        if isinstance(option_type, str) and option_type:
+            self.var_option_type.set(option_type.lower())
+
+        expiration = row.get("expiration")
+        if isinstance(expiration, str) and expiration:
+            self.var_expiration.set(expiration)
+
+        multiplier = row.get("multiplier")
+        if pd.notna(multiplier):
+            try:
+                self.var_multiplier.set(int(multiplier))
+            except Exception:  # noqa: BLE001 - default to current multiplier if conversion fails
+                pass
+
+        strike = row.get("strike")
+        if pd.notna(strike):
+            self.var_strike.set(float(strike))
+
+        mark = row.get("mark")
+        if pd.notna(mark):
+            self.var_entry.set(float(mark))
+        elif pd.notna(row.get("last")):
+            self.var_entry.set(float(row["last"]))
+
+        dte = row.get("dte")
+        if pd.notna(dte):
+            self.var_dte.set(int(dte))
+
+        iv = row.get("iv")
+        if pd.notna(iv) and iv > 0:
+            self.var_iv_mode.set("fixed")
+            self.var_iv_fixed.set(float(iv))
+
+        underlying = row.get("underlying_price")
+        if pd.isna(underlying) and self._latest_underlying_price is not None:
+            underlying = self._latest_underlying_price
+        if pd.notna(underlying):
+            self.var_spot.set(float(underlying))
+
+        messagebox.showinfo(
+            "Use option",
+            "Selected contract details copied into the simulation form. Adjust any remaining fields as needed before running.",
+        )
+
     # ======= Helpers =======
     def _add_labeled_entry(self, parent, text, var, row, col):
         frm = ttk.Frame(parent)
@@ -224,8 +489,20 @@ class SimUI(tk.Tk):
         ttk.Label(frm, text=label).pack(side="top", anchor="w")
         ttk.Combobox(frm, textvariable=var, values=values, width=18, state="readonly").pack(side="top", anchor="w")
 
+    @staticmethod
+    def _option_code(option_type: str) -> str:
+        return {"call": "C", "put": "P"}.get(option_type.lower(), option_type.upper())
+
     def _collect_config_single(self) -> SimConfig:
+        symbol = self.var_symbol.get().strip().upper() or "GLD"
+        expiration = self.var_expiration.get().strip() or None
+        option_type = self.var_option_type.get().strip().lower()
+
         return SimConfig(
+            symbol=symbol,
+            option_type=option_type,
+            expiration=expiration,
+            contract_multiplier=self.var_multiplier.get(),
             spot=self.var_spot.get(),
             strike=self.var_strike.get(),
             dte_calendar=self.var_dte.get(),
@@ -244,11 +521,20 @@ class SimUI(tk.Tk):
             avoid_final_days=self.var_avoid.get(),
             mu_mode=self.var_mu_mode.get(),
             mu_custom=self.var_mu_custom.get(),
+            data_provider=self.data_settings,
         )
 
     def _collect_config_batch_common(self) -> SimConfig:
         # shared settings across all strikes in the batch
+        symbol = self.b_symbol.get().strip().upper() or "GLD"
+        expiration = self.b_expiration.get().strip() or None
+        option_type = self.b_option_type.get().strip().lower()
+
         return SimConfig(
+            symbol=symbol,
+            option_type=option_type,
+            expiration=expiration,
+            contract_multiplier=self.b_multiplier.get(),
             spot=self.b_spot.get(),
             dte_calendar=self.b_dte.get(),
             annual_trading_days=self.b_annual.get(),
@@ -266,6 +552,7 @@ class SimUI(tk.Tk):
             avoid_final_days=self.b_avoid.get(),
             mu_mode=self.b_mu_mode.get(),
             mu_custom=self.b_mu_custom.get(),
+            data_provider=self.data_settings,
         )
 
     # ======= Actions =======
@@ -279,7 +566,8 @@ class SimUI(tk.Tk):
         summary, details = simulate(cfg)
         os.makedirs("out", exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        tag = f"GLD_{int(cfg.strike)}C_{cfg.dte_calendar}DTE_tr{cfg.num_trials}_{stamp}"
+        code = self._option_code(cfg.option_type)
+        tag = f"{cfg.symbol}_{int(cfg.strike)}{code}_{cfg.dte_calendar}DTE_tr{cfg.num_trials}_{stamp}"
         summary.to_csv(os.path.join("out", f"{tag}_summary.csv"), index=False)
         details.to_csv(os.path.join("out", f"{tag}_details.csv"), index=False)
 
@@ -298,27 +586,38 @@ class SimUI(tk.Tk):
         base = self._collect_config_batch_common()
         os.makedirs("out", exist_ok=True)
 
-        results = []  # list of (strike, summary_df, details_df)
+        results = []  # list of result dicts
         stamp = time.strftime("%Y%m%d_%H%M%S")
 
         for k in strikes:
             cfg = SimConfig(**{**base.__dict__, "strike": k})
             summary, details = simulate(cfg)
 
-            tag = f"GLD_{int(k)}C_{cfg.dte_calendar}DTE_tr{cfg.num_trials}_{stamp}"
+            code = self._option_code(cfg.option_type)
+            tag = f"{cfg.symbol}_{int(k)}{code}_{cfg.dte_calendar}DTE_tr{cfg.num_trials}_{stamp}"
             summary.to_csv(os.path.join("out", f"{tag}_summary.csv"), index=False)
             details.to_csv(os.path.join("out", f"{tag}_details.csv"), index=False)
 
             s_copy = summary.copy()
             s_copy.insert(0, "Strike", k)
-            results.append((k, s_copy, details))
+            s_copy.insert(1, "Option Type", cfg.option_type)
+            results.append({
+                "strike": k,
+                "option_type": cfg.option_type,
+                "summary": s_copy,
+                "details": details,
+            })
 
         # Save combined batch summary
-        combo = pd.concat([r[1] for r in results], ignore_index=True)
+        combo = pd.concat([r["summary"] for r in results], ignore_index=True)
         combo.to_csv(os.path.join("out", f"batch_summary_{stamp}.csv"), index=False)
 
         # Show batch results window (overlaid charts)
         self._show_results_window_batch(results, stamp)
+
+    def destroy(self):
+        self._stop_chain_stream()
+        super().destroy()
 
     # ======= Result windows =======
     def _show_results_window_single(self, details: pd.DataFrame, tag: str):
@@ -357,10 +656,7 @@ class SimUI(tk.Tk):
         ttk.Button(win, text="Close", command=win.destroy).pack(side="bottom", pady=PAD)
 
     def _show_results_window_batch(self, results, stamp_tag: str):
-        """
-        results: list of (strike, summary_df, details_df)
-        Draw overlaid histograms with distinct colors + legend.
-        """
+        """Draw overlaid histograms with distinct colors + legend."""
         win = tk.Toplevel(self)
         win.title(f"Batch Results — {stamp_tag}")
         win.geometry("1200x780")
@@ -379,13 +675,16 @@ class SimUI(tk.Tk):
         fig1 = plt.Figure(figsize=(6.8, 5.0), dpi=100)
         ax1 = fig1.add_subplot(111)
 
-        for idx, (k, _summary, details) in enumerate(results):
+        for idx, result in enumerate(results):
+            k = result["strike"]
+            option_type = result["option_type"]
+            details = result["details"]
             color = palette[idx % len(palette)]
             ax1.hist(
                 details["final_pl"],
                 bins=70,
                 alpha=0.35,
-                label=f"{int(k)}C",
+                label=f"{int(k)}{self._option_code(option_type)}",
                 color=color
             )
 
@@ -393,7 +692,7 @@ class SimUI(tk.Tk):
         ax1.set_xlabel("P&L per contract ($)")
         ax1.set_ylabel("Frequency")
         ax1.grid(True, alpha=0.3)
-        ax1.legend(title="Strike")
+        ax1.legend(title="Strike/Type")
 
         canvas1 = FigureCanvasTkAgg(fig1, master=container)
         canvas1.draw()
@@ -403,14 +702,17 @@ class SimUI(tk.Tk):
         fig2 = plt.Figure(figsize=(6.8, 5.0), dpi=100)
         ax2 = fig2.add_subplot(111)
 
-        for idx, (k, _summary, details) in enumerate(results):
+        for idx, result in enumerate(results):
+            k = result["strike"]
+            option_type = result["option_type"]
+            details = result["details"]
             color = palette[idx % len(palette)]
             if details["hit_target"].any():
                 ax2.hist(
                     details.loc[details["hit_target"], "hit_day"],
                     bins=range(1, 60),
                     alpha=0.45,
-                    label=f"{int(k)}C",
+                    label=f"{int(k)}{self._option_code(option_type)}",
                     color=color
                 )
 
@@ -418,7 +720,7 @@ class SimUI(tk.Tk):
         ax2.set_xlabel("Trading day of exit")
         ax2.set_ylabel("Count")
         ax2.grid(True, alpha=0.3)
-        ax2.legend(title="Strike")
+        ax2.legend(title="Strike/Type")
 
         canvas2 = FigureCanvasTkAgg(fig2, master=container)
         canvas2.draw()

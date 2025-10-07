@@ -17,6 +17,7 @@ Below is the prioritized queue of work items to continue generalizing the simula
   - Add configuration hooks so the simulator selects a provider at runtime.
 - **Status:** ✅ Framework in place with `MarketDataProvider` protocol, Schwab adapter skeleton, polling stream handle, mock generator, and UI integration that streams the chain into a live table. Next up: wire the real Schwab client implementation and credential flow.
 
+
 [View task](#next-tasks)
 
 ---

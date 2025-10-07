@@ -18,7 +18,9 @@ def _option_code(option_type: str) -> str:
 def parse_args():
     p = argparse.ArgumentParser(description="Options Monte-Carlo simulator (single contract).")
     p.add_argument("--symbol", default="GLD", help="underlying symbol")
+
     p.add_argument("--option-type", choices=["call", "put"], default="call", help="option contract type")
+    
     p.add_argument("--expiration", default="", help="expiration date (YYYY-MM-DD)")
     p.add_argument("--multiplier", type=int, default=100, help="contract multiplier (shares per contract)")
     # Primary knobs

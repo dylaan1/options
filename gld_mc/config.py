@@ -24,7 +24,10 @@ class SimConfig:
     option_type: str             = "call"      # "call" or "put"
     expiration: str | None       = None        # ISO date string when available
     contract_multiplier: int     = 100
+
     data_provider: DataProviderConfig = field(default_factory=DataProviderConfig)
+
+
 
     # Market & contract
     spot: float                  = 364.38

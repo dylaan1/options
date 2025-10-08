@@ -2,16 +2,26 @@ from __future__ import annotations
 import math
 import numpy as np
 import pandas as pd
-from dataclasses import asdict
 
 from .config import SimConfig
-from .pricing import black_scholes_call
+from .pricing import black_scholes_call, black_scholes_put
 
 def simulate(cfg: SimConfig):
     """
-    Run a single Monte-Carlo simulation for a long call with target/stop rules.
+    Run a single Monte-Carlo simulation for a long call or put with target/stop rules.
     Returns: (summary_df, details_df)
     """
+    option_type = cfg.option_type.lower()
+    if option_type not in {"call", "put"}:
+        raise NotImplementedError(f"option_type='{cfg.option_type}' is not yet supported")
+
+    if option_type == "call":
+        price_fn = black_scholes_call
+        intrinsic_fn = lambda spot: max(spot - cfg.strike, 0.0)
+    else:
+        price_fn = black_scholes_put
+        intrinsic_fn = lambda spot: max(cfg.strike - spot, 0.0)
+
     rng = np.random.default_rng(cfg.seed)
 
     trading_days = max(int(round(cfg.dte_calendar * (cfg.annual_trading_days / 365.0))), 1)
@@ -35,8 +45,10 @@ def simulate(cfg: SimConfig):
     final_pl    = np.zeros(cfg.num_trials, dtype=float)
     exit_price  = np.zeros(cfg.num_trials, dtype=float)
     exit_reason = np.array(["hold"] * cfg.num_trials, dtype=object)
+    days_open   = np.zeros(cfg.num_trials, dtype=int)
+    pl_paths    = np.zeros((cfg.num_trials, trading_days), dtype=float)
 
-    entry_cash = cfg.entry_price * 100.0 + cfg.commission_per_side
+    entry_cash = cfg.entry_price * cfg.contract_multiplier + cfg.commission_per_side
 
     for i in range(cfg.num_trials):
         sigma = sigmas[i]
@@ -48,9 +60,10 @@ def simulate(cfg: SimConfig):
             S = S * math.exp((mu - 0.5 * sigma * sigma) * dt + sigma * math.sqrt(dt) * z)
 
             T_rem = Ts[t]
-            C = black_scholes_call(S, cfg.strike, T_rem, cfg.risk_free_rate, sigma)
-            exit_cash = C * 100.0 - cfg.commission_per_side
+            option_price = price_fn(S, cfg.strike, T_rem, cfg.risk_free_rate, sigma)
+            exit_cash = option_price * cfg.contract_multiplier - cfg.commission_per_side
             pnl = exit_cash - entry_cash
+            pl_paths[i, t] = pnl
 
             days_left = trading_days - (t + 1)
             can_exit  = (cfg.avoid_final_days == 0) or (days_left > cfg.avoid_final_days)
@@ -59,40 +72,54 @@ def simulate(cfg: SimConfig):
                 hit_target[i]  = True
                 hit_day[i]     = t + 1
                 final_pl[i]    = pnl
-                exit_price[i]  = C
+                exit_price[i]  = option_price
                 exit_reason[i] = "target"
+                days_open[i]   = t + 1
+                pl_paths[i, t:] = pnl
                 exited = True
                 break
 
-            if can_exit and C <= cfg.stop_option_price:
+            if can_exit and option_price <= cfg.stop_option_price:
                 hit_target[i]  = False
                 hit_day[i]     = t + 1
                 final_pl[i]    = pnl
-                exit_price[i]  = C
+                exit_price[i]  = option_price
                 exit_reason[i] = "stop"
+                days_open[i]   = t + 1
+                pl_paths[i, t:] = pnl
                 exited = True
                 break
 
         if not exited:
-            C_exp = max(S - cfg.strike, 0.0)
-            exit_cash = C_exp * 100.0 - cfg.commission_per_side
+            intrinsic = intrinsic_fn(S)
+            exit_cash = intrinsic * cfg.contract_multiplier - cfg.commission_per_side
             final_pl[i]    = exit_cash - entry_cash
-            exit_price[i]  = C_exp
-            exit_reason[i] = "expiry_ITM" if C_exp > 0 else "expiry_OTM"
+            exit_price[i]  = intrinsic
+            exit_reason[i] = "expiry_ITM" if intrinsic > 0 else "expiry_OTM"
+            days_open[i]   = trading_days
+            pl_paths[i, -1] = final_pl[i]
+        elif trading_days > days_open[i]:
+            pl_paths[i, days_open[i]:] = final_pl[i]
 
     # Summary stats
     prob_hit = hit_target.mean()
     med_day  = float(np.median(hit_day[hit_day > 0])) if np.any(hit_day > 0) else float("nan")
     p5, p25, p50, p75, p95 = np.percentile(final_pl, [5, 25, 50, 75, 95])
 
+    option_label = cfg.option_type.lower()
+    option_display = {"call": "Call", "put": "Put"}.get(option_label, cfg.option_type)
+    expiration_display = cfg.expiration or "n/a"
+
     summary = pd.DataFrame({
         "Metric": [
-            "Trials", "Trading Days", "IV Mode", "IV Fixed", "IV Range",
-            "Drift Mode", "Drift (annual)", "Entry Price", "Strike", "Target Profit",
+            "Symbol", "Option Type", "Expiration", "Contract Multiplier", "Trials",
+            "Trading Days", "IV Mode", "IV Fixed", "IV Range", "Drift Mode",
+            "Drift (annual)", "Entry Price", "Strike", "Target Profit",
             "Stop (option price)", "P(hit target before expiry)", "Median day to hit target",
             "Mean Final P&L", "P&L p5", "P&L p25", "P&L p50", "P&L p75", "P&L p95"
         ],
         "Value": [
+            cfg.symbol, option_display, expiration_display, cfg.contract_multiplier,
             f"{cfg.num_trials:,}", trading_days, cfg.iv_mode, cfg.iv_fixed,
             f"{cfg.iv_min}–{cfg.iv_max}", cfg.mu_mode, cfg.mu_custom,
             f"${cfg.entry_price:.2f}", cfg.strike, f"${cfg.target_profit:.0f}",
@@ -102,13 +129,22 @@ def simulate(cfg: SimConfig):
         ]
     })
 
+    calendar_days = np.maximum(days_open - 1, 0)
+    entry_value = cfg.entry_price * cfg.contract_multiplier
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pl_percent = np.where(entry_value != 0, final_pl / entry_value, np.nan)
+
     details = pd.DataFrame({
         "hit_target": hit_target,
         "hit_day": hit_day,
+        "days_open": days_open,
+        "calendar_days": calendar_days,
         "final_pl": final_pl,
+        "pl_percent": pl_percent,
         "exit_price": exit_price,
         "exit_reason": exit_reason,
-        "sigma": sigmas
+        "sigma": sigmas,
+        "pl_path": [list(path) for path in pl_paths],
     })
 
     return summary, details

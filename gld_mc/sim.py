@@ -45,6 +45,8 @@ def simulate(cfg: SimConfig):
     final_pl    = np.zeros(cfg.num_trials, dtype=float)
     exit_price  = np.zeros(cfg.num_trials, dtype=float)
     exit_reason = np.array(["hold"] * cfg.num_trials, dtype=object)
+    days_open   = np.zeros(cfg.num_trials, dtype=int)
+    pl_paths    = np.zeros((cfg.num_trials, trading_days), dtype=float)
 
     entry_cash = cfg.entry_price * cfg.contract_multiplier + cfg.commission_per_side
 
@@ -61,6 +63,7 @@ def simulate(cfg: SimConfig):
             option_price = price_fn(S, cfg.strike, T_rem, cfg.risk_free_rate, sigma)
             exit_cash = option_price * cfg.contract_multiplier - cfg.commission_per_side
             pnl = exit_cash - entry_cash
+            pl_paths[i, t] = pnl
 
             days_left = trading_days - (t + 1)
             can_exit  = (cfg.avoid_final_days == 0) or (days_left > cfg.avoid_final_days)
@@ -71,6 +74,8 @@ def simulate(cfg: SimConfig):
                 final_pl[i]    = pnl
                 exit_price[i]  = option_price
                 exit_reason[i] = "target"
+                days_open[i]   = t + 1
+                pl_paths[i, t:] = pnl
                 exited = True
                 break
 
@@ -80,6 +85,8 @@ def simulate(cfg: SimConfig):
                 final_pl[i]    = pnl
                 exit_price[i]  = option_price
                 exit_reason[i] = "stop"
+                days_open[i]   = t + 1
+                pl_paths[i, t:] = pnl
                 exited = True
                 break
 
@@ -89,6 +96,10 @@ def simulate(cfg: SimConfig):
             final_pl[i]    = exit_cash - entry_cash
             exit_price[i]  = intrinsic
             exit_reason[i] = "expiry_ITM" if intrinsic > 0 else "expiry_OTM"
+            days_open[i]   = trading_days
+            pl_paths[i, -1] = final_pl[i]
+        elif trading_days > days_open[i]:
+            pl_paths[i, days_open[i]:] = final_pl[i]
 
     # Summary stats
     prob_hit = hit_target.mean()
@@ -118,13 +129,22 @@ def simulate(cfg: SimConfig):
         ]
     })
 
+    calendar_days = np.maximum(days_open - 1, 0)
+    entry_value = cfg.entry_price * cfg.contract_multiplier
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pl_percent = np.where(entry_value != 0, final_pl / entry_value, np.nan)
+
     details = pd.DataFrame({
         "hit_target": hit_target,
         "hit_day": hit_day,
+        "days_open": days_open,
+        "calendar_days": calendar_days,
         "final_pl": final_pl,
+        "pl_percent": pl_percent,
         "exit_price": exit_price,
         "exit_reason": exit_reason,
-        "sigma": sigmas
+        "sigma": sigmas,
+        "pl_path": [list(path) for path in pl_paths],
     })
 
     return summary, details

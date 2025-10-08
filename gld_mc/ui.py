@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 from typing import Any, Callable, Dict, Optional
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -45,6 +46,7 @@ class ContractCell(tk.Frame):
         contract: pd.Series | None,
         *,
         side: str,
+        metrics: list[tuple[str, str]],
     ) -> None:
         super().__init__(parent, bd=1, relief="solid", background=self.DEFAULT_BG, highlightthickness=0)
         self.viewer = viewer
@@ -102,18 +104,26 @@ class ContractCell(tk.Frame):
 class OptionsChainViewer(ttk.Frame):
     """Scrollable matrix of call/put contracts grouped by strike."""
 
-    metrics = [
-        ("DTE", "dte"),
+    CALL_METRICS = [
+        ("IV %", "iv_percent"),
+        ("Open Int", "open_interest"),
+        ("Volume", "volume"),
+        ("Gamma", "gamma"),
+        ("Vega", "vega"),
+        ("Theta", "theta"),
+        ("Delta", "delta"),
         ("Mark", "mark"),
-        ("Trade Price", "trade_price"),
-        ("P/L Open", "pl_open"),
-        ("P/L %", "pl_pct"),
+    ]
+
+    PUT_METRICS = [
+        ("Mark", "mark"),
         ("Delta", "delta"),
         ("Theta", "theta"),
         ("Vega", "vega"),
-        ("IV%", "iv_percent"),
+        ("Gamma", "gamma"),
         ("Volume", "volume"),
-        ("Open Interest", "open_interest"),
+        ("Open Int", "open_interest"),
+        ("IV %", "iv_percent"),
     ]
 
     def __init__(
@@ -134,38 +144,112 @@ class OptionsChainViewer(ttk.Frame):
 
         self._last_update = tk.StringVar(value="")
         self._underlying_var = tk.StringVar(value="")
+        self._expiration_var = tk.StringVar(value="")
 
         header = ttk.Frame(self)
         header.pack(fill="x", pady=(0, PAD))
         ttk.Label(header, text="Live Option Chain", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+        ttk.Label(header, textvariable=self._expiration_var).pack(side="left", padx=(PAD, 0))
         ttk.Label(header, textvariable=self._underlying_var).pack(side="right")
         ttk.Label(header, textvariable=self._last_update).pack(side="right", padx=(0, PAD))
 
-        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
-        self.canvas.pack(side="left", fill="both", expand=True)
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        vsb.pack(side="right", fill="y")
-        self.canvas.configure(yscrollcommand=vsb.set)
+        main = ttk.Frame(self)
+        main.pack(fill="both", expand=True)
+        main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, weight=0)
+        main.columnconfigure(2, weight=1)
+        main.columnconfigure(3, weight=0)
+        main.rowconfigure(0, weight=1)
 
-        self._table = ttk.Frame(self.canvas)
-        self._window = self.canvas.create_window((0, 0), window=self._table, anchor="nw")
-        self._table.bind("<Configure>", self._on_table_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_resize)
+        # --- Calls ---
+        self._call_frame = ttk.Frame(main)
+        self._call_frame.grid(row=0, column=0, sticky="nsew")
+        self._call_frame.rowconfigure(0, weight=1)
+        self._call_frame.columnconfigure(0, weight=1)
+        self.call_canvas = tk.Canvas(self._call_frame, borderwidth=0, highlightthickness=0)
+        self.call_canvas.grid(row=0, column=0, sticky="nsew")
+        self.call_table = ttk.Frame(self.call_canvas)
+        self._call_window = self.call_canvas.create_window((0, 0), window=self.call_table, anchor="nw")
+        self.call_table.bind("<Configure>", lambda _e: self._update_scrollregions())
+        self.call_canvas.configure(yscrollcommand=self._on_call_yview)
+        self.call_canvas.bind("<Configure>", lambda e: self.call_canvas.itemconfigure(self._call_window, height=e.height))
+        self.call_hsb = ttk.Scrollbar(self._call_frame, orient="horizontal", command=self.call_canvas.xview)
+        self.call_hsb.grid(row=1, column=0, sticky="ew")
+        self.call_canvas.configure(xscrollcommand=self.call_hsb.set)
 
-    def _on_table_configure(self, _event) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # --- Strike ---
+        self._strike_frame = ttk.Frame(main)
+        self._strike_frame.grid(row=0, column=1, sticky="ns")
+        self._strike_frame.rowconfigure(0, weight=1)
+        self._strike_frame.columnconfigure(0, weight=1)
+        self.strike_canvas = tk.Canvas(self._strike_frame, borderwidth=0, highlightthickness=0, width=120)
+        self.strike_canvas.grid(row=0, column=0, sticky="ns")
+        self.strike_table = ttk.Frame(self.strike_canvas)
+        self._strike_window = self.strike_canvas.create_window((0, 0), window=self.strike_table, anchor="nw")
+        self.strike_table.bind("<Configure>", lambda _e: self._update_scrollregions())
+        self.strike_canvas.configure(yscrollcommand=self._on_strike_yview)
 
-    def _on_canvas_resize(self, event) -> None:
-        self.canvas.itemconfigure(self._window, width=event.width)
+        # --- Puts ---
+        self._put_frame = ttk.Frame(main)
+        self._put_frame.grid(row=0, column=2, sticky="nsew")
+        self._put_frame.rowconfigure(0, weight=1)
+        self._put_frame.columnconfigure(0, weight=1)
+        self.put_canvas = tk.Canvas(self._put_frame, borderwidth=0, highlightthickness=0)
+        self.put_canvas.grid(row=0, column=0, sticky="nsew")
+        self.put_table = ttk.Frame(self.put_canvas)
+        self._put_window = self.put_canvas.create_window((0, 0), window=self.put_table, anchor="nw")
+        self.put_table.bind("<Configure>", lambda _e: self._update_scrollregions())
+        self.put_canvas.configure(yscrollcommand=self._on_put_yview)
+        self.put_canvas.bind("<Configure>", lambda e: self.put_canvas.itemconfigure(self._put_window, height=e.height))
+        self.put_hsb = ttk.Scrollbar(self._put_frame, orient="horizontal", command=self.put_canvas.xview)
+        self.put_hsb.grid(row=1, column=0, sticky="ew")
+        self.put_canvas.configure(xscrollcommand=self.put_hsb.set)
 
-    def clear(self) -> None:
-        for child in self._table.winfo_children():
-            child.destroy()
+        # --- Vertical Scrollbar ---
+        self.vsb = ttk.Scrollbar(main, orient="vertical", command=self._on_vertical_scroll)
+        self.vsb.grid(row=0, column=3, sticky="ns")
+
+        self._clear_tables()
+
+    def _clear_tables(self) -> None:
+        for table in (self.call_table, self.strike_table, self.put_table):
+            for child in table.winfo_children():
+                child.destroy()
         self._cells_by_key.clear()
         if self._selected_cell is not None:
             self._selected_cell.set_selected(False)
         self._selected_cell = None
         self._selected_key = None
+        self._update_scrollregions()
+
+    def _update_scrollregions(self) -> None:
+        self.call_canvas.configure(scrollregion=self.call_canvas.bbox("all"))
+        self.put_canvas.configure(scrollregion=self.put_canvas.bbox("all"))
+        self.strike_canvas.configure(scrollregion=self.strike_canvas.bbox("all"))
+
+    def _on_call_yview(self, *args) -> None:
+        self.vsb.set(*args)
+        self.strike_canvas.yview_moveto(args[0])
+        self.put_canvas.yview_moveto(args[0])
+
+    def _on_put_yview(self, *args) -> None:
+        self.vsb.set(*args)
+        self.call_canvas.yview_moveto(args[0])
+        self.strike_canvas.yview_moveto(args[0])
+
+    def _on_strike_yview(self, *args) -> None:
+        self.vsb.set(*args)
+        self.call_canvas.yview_moveto(args[0])
+        self.put_canvas.yview_moveto(args[0])
+
+    def _on_vertical_scroll(self, *args) -> None:
+        self.call_canvas.yview(*args)
+        self.put_canvas.yview(*args)
+        self.strike_canvas.yview(*args)
+
+    def clear(self) -> None:
+        self._clear_tables()
+        self.update_expiration_label(None)
 
     def update_underlying(self, price: float | None) -> None:
         if price is None:
@@ -173,79 +257,114 @@ class OptionsChainViewer(ttk.Frame):
         else:
             self._underlying_var.set(f"Spot: {price:.2f}")
 
-    def update_from_dataframe(self, df: pd.DataFrame, timestamp: str | None = None) -> None:
+    def update_expiration_label(self, expiration: str | None) -> None:
+        if expiration:
+            self._expiration_var.set(f"Expiration: {expiration}")
+        else:
+            self._expiration_var.set("")
+
+    def update_from_dataframe(
+        self,
+        df: pd.DataFrame,
+        timestamp: str | None = None,
+        *,
+        expiration: str | None = None,
+    ) -> None:
         current_key = self._selected_key
         self._data = df.reset_index(drop=True)
-        self.clear()
+        self._clear_tables()
+
+        # Header rows
+        self._build_header_row(self.call_table, self.CALL_METRICS, heading="CALLS")
+        self._build_strike_header()
+        self._build_header_row(self.put_table, self.PUT_METRICS, heading="PUTS")
 
         if df.empty:
             self._last_update.set("No data")
         else:
-            grouped: dict[tuple[Any, float], dict[str, pd.Series]] = {}
+            grouped: dict[float, dict[str, pd.Series]] = {}
             for _, row in self._data.iterrows():
                 strike = float(row.get("strike", 0.0))
-                expiration = row.get("expiration")
                 option_type = (row.get("option_type") or "").lower()
-                key = (expiration, strike)
-                grouped.setdefault(key, {})[option_type] = row
+                grouped.setdefault(strike, {})[option_type] = row
 
-            self._build_header_row()
-
-            for idx, ((expiration, strike), legs) in enumerate(
-                sorted(grouped.items(), key=lambda item: (item[0][0] or "", item[0][1]))
-            , start=1):
+            for idx, (strike, legs) in enumerate(sorted(grouped.items()), start=1):
                 call_row = legs.get("call")
                 put_row = legs.get("put")
-                call_cell = self._create_cell(call_row, side="call")
-                call_cell.grid(row=idx, column=0, sticky="nsew", padx=(0, PAD // 2), pady=4)
 
-                strike_text = f"{strike:.2f}\n{expiration or ''}"
-                ttk.Label(
-                    self._table,
+                call_cell = self._create_cell(self.call_table, call_row, side="call", metrics=self.CALL_METRICS)
+                call_cell.grid(row=idx, column=0, sticky="nsew", pady=2, padx=2)
+
+                strike_text = f"{strike:.2f}"
+                lbl = tk.Label(
+                    self.strike_table,
                     text=strike_text,
-                    anchor="center",
                     font=("TkDefaultFont", 10, "bold"),
-                ).grid(row=idx, column=1, sticky="nsew", padx=4, pady=4)
+                    width=10,
+                    padx=4,
+                    pady=6,
+                    anchor="center",
+                )
+                lbl.grid(row=idx, column=0, sticky="nsew", pady=2)
 
-                put_cell = self._create_cell(put_row, side="put")
-                put_cell.grid(row=idx, column=2, sticky="nsew", padx=(PAD // 2, 0), pady=4)
+                put_cell = self._create_cell(self.put_table, put_row, side="put", metrics=self.PUT_METRICS)
+                put_cell.grid(row=idx, column=0, sticky="nsew", pady=2, padx=2)
 
-                self._table.rowconfigure(idx, weight=1)
-
-            self._table.columnconfigure(0, weight=1)
-            self._table.columnconfigure(1, weight=0)
-            self._table.columnconfigure(2, weight=1)
+                self.call_table.rowconfigure(idx, weight=0)
+                self.put_table.rowconfigure(idx, weight=0)
+                self.strike_table.rowconfigure(idx, weight=0)
 
             if timestamp:
                 self._last_update.set(f"Updated {timestamp}")
             else:
                 self._last_update.set("Updated")
 
+            self.update_expiration_label(expiration)
+
             if current_key is not None:
                 self.select_by_key(current_key)
 
-    def _build_header_row(self) -> None:
-        ttk.Label(
-            self._table,
-            text="CALLS",
-            font=("TkDefaultFont", 10, "bold"),
-            anchor="center",
-        ).grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        ttk.Label(
-            self._table,
-            text="STRIKE",
-            font=("TkDefaultFont", 10, "bold"),
-            anchor="center",
-        ).grid(row=0, column=1, sticky="ew", pady=(0, 4))
-        ttk.Label(
-            self._table,
-            text="PUTS",
-            font=("TkDefaultFont", 10, "bold"),
-            anchor="center",
-        ).grid(row=0, column=2, sticky="ew", pady=(0, 4))
+        self._update_scrollregions()
 
-    def _create_cell(self, row: pd.Series | None, *, side: str) -> ContractCell:
-        cell = ContractCell(self, self._table, row, side=side)
+    def _build_header_row(self, table: ttk.Frame, metrics: list[tuple[str, str]], *, heading: str) -> None:
+        header = ttk.Frame(table)
+        header.grid(row=0, column=0, sticky="ew")
+        for idx in range(len(metrics)):
+            header.columnconfigure(idx, weight=1)
+
+        ttk.Label(
+            header,
+            text=heading,
+            anchor="center",
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=len(metrics), sticky="nsew", pady=(0, 2))
+
+        for idx, (label, _column) in enumerate(metrics):
+            ttk.Label(
+                header,
+                text=label,
+                anchor="center",
+                font=("TkDefaultFont", 9, "bold"),
+            ).grid(row=1, column=idx, sticky="nsew", padx=1, pady=(0, 2))
+
+    def _build_strike_header(self) -> None:
+        lbl = ttk.Label(
+            self.strike_table,
+            text="STRIKE",
+            anchor="center",
+            font=("TkDefaultFont", 10, "bold"),
+        )
+        lbl.grid(row=0, column=0, sticky="ew", pady=2)
+
+    def _create_cell(
+        self,
+        table: ttk.Frame,
+        row: pd.Series | None,
+        *,
+        side: str,
+        metrics: list[tuple[str, str]],
+    ) -> ContractCell:
+        cell = ContractCell(self, table, row, side=side, metrics=metrics)
         if cell.contract is not None and cell.key is not None:
             self._cells_by_key[cell.key] = cell
         return cell
@@ -290,6 +409,17 @@ class OptionsChainViewer(ttk.Frame):
         if value is None or (isinstance(value, str) and not value) or pd.isna(value):
             return "-f"
         try:
+            if column in {"mark"}:
+                return f"{float(value):.2f}"
+            if column in {"delta", "theta", "vega", "gamma"}:
+                return f"{float(value):.4f}"
+            if column in {"volume", "open_interest"}:
+                return f"{int(round(float(value)))}"
+            if column in {"iv_percent"}:
+                pct = float(value)
+                if abs(pct) < 1:
+                    pct *= 100.0
+                return f"{pct:.2f}%"
             if column == "dte":
                 return f"{int(round(float(value)))}"
             if column in {"mark", "trade_price", "pl_open"}:
@@ -320,6 +450,12 @@ class SimUI(tk.Tk):
         self._selected_contract: pd.Series | None = None
         self._selected_contract_key: Optional[tuple[Any, ...]] = None
         self._selection_status = tk.StringVar(value="No contract selected")
+        self._recent_symbols: list[str] = []
+        self._symbol_inputs: list[ttk.Combobox] = []
+        self._available_expirations: list[str] = []
+        self._last_chain_timestamp: str | None = None
+        self.var_chain_expiration = tk.StringVar(value="")
+        self._chain_exp_combo: ttk.Combobox | None = None
         self._build_notebook()
 
     def _build_notebook(self):
@@ -446,6 +582,20 @@ class SimUI(tk.Tk):
             on_activate=self._on_contract_activate,
         )
         self.chain_view.pack(fill="both", expand=True)
+
+        exp_frame = ttk.Frame(mdat)
+        exp_frame.pack(fill="x", pady=(PAD // 2, 0))
+        ttk.Label(exp_frame, text="Expiration").pack(side="left")
+        self._chain_exp_combo = ttk.Combobox(
+            exp_frame,
+            textvariable=self.var_chain_expiration,
+            state="readonly",
+            width=18,
+            values=[],
+        )
+        self._chain_exp_combo.pack(side="left", padx=(PAD // 2, 0))
+        self._chain_exp_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_chain_expiration_change())
+
         ttk.Label(mdat, textvariable=self._selection_status).pack(anchor="w", pady=(PAD // 2, 0))
 
         # --- Buttons
@@ -578,6 +728,14 @@ class SimUI(tk.Tk):
         self._selected_contract = None
         self._selected_contract_key = None
         self._selection_status.set("No contract selected")
+        self._latest_chain = None
+        self.chain_view.clear_selection()
+        self.chain_view.clear()
+        self._available_expirations = []
+        self.var_chain_expiration.set("")
+        if self._chain_exp_combo is not None:
+            self._chain_exp_combo.configure(values=[])
+        self._last_chain_timestamp = None
         self.chain_view.clear_selection()
 
         try:
@@ -614,11 +772,12 @@ class SimUI(tk.Tk):
             self._latest_underlying_price = float(underlying)
 
         self._latest_chain = prepared
+        self._last_chain_timestamp = timestamp
+        expirations = self._extract_expirations(prepared)
 
         def _update() -> None:
-            self.chain_view.update_underlying(self._latest_underlying_price)
-            self.chain_view.update_from_dataframe(prepared, timestamp)
-            self._refresh_selected_contract()
+            self._update_expiration_choices(expirations)
+            self._update_chain_display()
 
         self.after(0, _update)
 
@@ -799,12 +958,16 @@ class SimUI(tk.Tk):
         if symbol:
             self.var_symbol.set(symbol)
             self.b_symbol.set(symbol)
+            self._record_recent_symbol(symbol)
         if option_type:
             self.var_option_type.set(option_type)
             self.b_option_type.set(option_type)
         if expiration:
             self.var_expiration.set(expiration)
             self.b_expiration.set(expiration)
+            if expiration != self.var_chain_expiration.get().strip():
+                self.var_chain_expiration.set(expiration)
+                self._update_chain_display()
         if strike is not None:
             self.var_strike.set(float(strike))
         if entry is not None:
@@ -829,6 +992,24 @@ class SimUI(tk.Tk):
                 current.append(strike_text)
                 self.b_strikes_text.set(", ".join(current))
 
+    def _format_expiration_value(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+        else:
+            cleaned = value
+        try:
+            ts = pd.to_datetime(cleaned, errors="coerce")
+        except Exception:  # noqa: BLE001
+            ts = pd.NaT
+        if pd.isna(ts):
+            text = str(cleaned).strip()
+            return text or None
+        return ts.strftime("%Y-%m-%d")
+
     def _prepare_chain_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         data = df.copy()
         data.attrs = dict(getattr(df, "attrs", {}))
@@ -839,6 +1020,8 @@ class SimUI(tk.Tk):
             data["option_type"] = data["option_type"].fillna("").astype(str).str.lower()
         if "symbol" in data.columns:
             data["symbol"] = data["symbol"].fillna("").astype(str).str.upper()
+        if "expiration" in data.columns:
+            data["expiration"] = data["expiration"].apply(self._format_expiration_value)
         if "strike" in data.columns:
             data["strike"] = pd.to_numeric(data["strike"], errors="coerce")
         if "mark" in data.columns:
@@ -862,6 +1045,65 @@ class SimUI(tk.Tk):
 
         data["dte"] = data.apply(self._resolve_dte, axis=1)
         return data
+
+    def _extract_expirations(self, df: pd.DataFrame) -> list[str]:
+        if "expiration" not in df.columns:
+            return []
+        expirations = [str(v) for v in df["expiration"].dropna().tolist() if str(v).strip()]
+        seen = {exp for exp in expirations if exp}
+        return sorted(seen, key=self._expiration_sort_key)
+
+    @staticmethod
+    def _expiration_sort_key(value: str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            try:
+                return datetime.strptime(value, "%Y-%m-%d")
+            except ValueError:
+                return datetime.max
+
+    def _update_expiration_choices(self, expirations: list[str]) -> None:
+        current = self.var_chain_expiration.get().strip()
+        normalized = [exp for exp in expirations if exp]
+        if normalized != self._available_expirations:
+            self._available_expirations = normalized
+            if self._chain_exp_combo is not None:
+                self._chain_exp_combo.configure(values=self._available_expirations)
+
+        if current and current not in self._available_expirations:
+            current = ""
+        if not current and self._available_expirations:
+            current = self._available_expirations[0]
+
+        self.var_chain_expiration.set(current)
+        if current:
+            self.var_expiration.set(current)
+            self.b_expiration.set(current)
+
+    def _on_chain_expiration_change(self) -> None:
+        current = self.var_chain_expiration.get().strip()
+        if current:
+            self.var_expiration.set(current)
+            self.b_expiration.set(current)
+        self._update_chain_display()
+
+    def _update_chain_display(self) -> None:
+        if self._latest_chain is None:
+            self.chain_view.clear()
+            self.chain_view.update_underlying(self._latest_underlying_price)
+            return
+
+        expiration = self.var_chain_expiration.get().strip()
+        display = self._latest_chain
+        if expiration:
+            display = display.loc[display["expiration"] == expiration]
+        display = display.copy()
+        timestamp = self._last_chain_timestamp
+        expiration_label = expiration or None
+        self.chain_view.update_underlying(self._latest_underlying_price)
+        self.chain_view.update_from_dataframe(display, timestamp, expiration=expiration_label)
+        self._refresh_selected_contract()
 
     def _find_contract_by_key(
         self,
@@ -887,6 +1129,11 @@ class SimUI(tk.Tk):
         if self._selected_contract_key is None:
             return
         match = self._find_contract_by_key(self._selected_contract_key)
+        selected_exp = self.var_chain_expiration.get().strip()
+        if match is not None and selected_exp:
+            match_exp = str(match.get("expiration") or "")
+            if match_exp != selected_exp:
+                match = None
         if match is None:
             self._selected_contract = None
             self._selected_contract_key = None
@@ -919,6 +1166,17 @@ class SimUI(tk.Tk):
         return matches.iloc[0]
 
     # ======= Helpers =======
+    def _add_symbol_input(self, parent, text, var, row, col):
+        frm = ttk.Frame(parent)
+        frm.grid(row=row, column=col, sticky="w", padx=(0, PAD), pady=5)
+        ttk.Label(frm, text=text).pack(side="top", anchor="w")
+        combo = ttk.Combobox(frm, textvariable=var, values=self._recent_symbols, width=22)
+        combo.pack(side="top", anchor="w")
+        combo.configure(postcommand=lambda c=combo: c.configure(values=self._recent_symbols))
+        combo.bind("<<ComboboxSelected>>", lambda _e, v=var: self._on_symbol_combo_selected(v))
+        self._symbol_inputs.append(combo)
+        return combo
+
     def _add_labeled_entry(self, parent, text, var, row, col):
         frm = ttk.Frame(parent)
         frm.grid(row=row, column=col, sticky="w", padx=(0, PAD), pady=5)
@@ -1053,7 +1311,7 @@ class SimUI(tk.Tk):
         summary.to_csv(os.path.join("out", f"{tag}_summary.csv"), index=False)
         details.to_csv(os.path.join("out", f"{tag}_details.csv"), index=False)
 
-        self._show_results_window_single(details, tag)
+        self._show_results_window_single(cfg, summary, details, tag)
 
     def _run_batch(self):
         # Parse strikes
@@ -1108,6 +1366,7 @@ class SimUI(tk.Tk):
             results.append({
                 "strike": k,
                 "option_type": cfg.option_type,
+                "config": cfg,
                 "summary": s_copy,
                 "details": details,
             })
@@ -1124,38 +1383,93 @@ class SimUI(tk.Tk):
         super().destroy()
 
     # ======= Result windows =======
-    def _show_results_window_single(self, details: pd.DataFrame, tag: str):
+    def _show_results_window_single(
+        self,
+        cfg: SimConfig,
+        _summary: pd.DataFrame,
+        details: pd.DataFrame,
+        tag: str,
+    ) -> None:
         win = tk.Toplevel(self)
         win.title(f"Results — {tag}")
-        win.geometry("1150x720")
+        win.geometry("1250x860")
 
         container = ttk.Frame(win, padding=PAD)
         container.pack(fill="both", expand=True)
 
-        # Figure 1: Final P&L histogram
-        fig1 = plt.Figure(figsize=(6.4, 4.8), dpi=100)
+        table_frame = ttk.Frame(container)
+        table_frame.pack(fill="x", pady=(0, PAD))
+        columns = (
+            "ticker",
+            "contract",
+            "expiration",
+            "strike",
+            "open_price",
+            "close_price",
+            "pl_dollars",
+            "pl_percent",
+            "calendar",
+        )
+        headings = {
+            "ticker": "Ticker",
+            "contract": "Contract",
+            "expiration": "Expiration",
+            "strike": "Strike",
+            "open_price": "Open Price",
+            "close_price": "Close Price",
+            "pl_dollars": "P/L Open ($)",
+            "pl_percent": "P/L Open (%)",
+            "calendar": "Calendar",
+        }
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=1)
+        for col in columns:
+            tree.heading(col, text=headings[col])
+            anchor = "center" if col in {"ticker", "contract", "expiration", "strike"} else "e"
+            width = 120 if col in {"ticker", "contract"} else 140
+            tree.column(col, anchor=anchor, width=width, stretch=True)
+        tree.pack(fill="x")
+        tree.insert("", "end", values=self._compose_result_row(cfg, details))
+
+        charts_top = ttk.Frame(container)
+        charts_top.pack(fill="both", expand=True)
+
+        fig1 = plt.Figure(figsize=(6.0, 4.6), dpi=100)
         ax1 = fig1.add_subplot(111)
-        ax1.hist(details["final_pl"], bins=80)
+        ax1.hist(pd.to_numeric(details["final_pl"], errors="coerce").dropna(), bins=80, color="#5a9bd4", alpha=0.85)
         ax1.set_title("Final P&L Distribution")
         ax1.set_xlabel("P&L per contract ($)")
         ax1.set_ylabel("Frequency")
         ax1.grid(True, alpha=0.3)
-        canvas1 = FigureCanvasTkAgg(fig1, master=container)
+        canvas1 = FigureCanvasTkAgg(fig1, master=charts_top)
         canvas1.draw()
         canvas1.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(0, PAD))
 
-        # Figure 2: Exit Day histogram (target hits only)
-        fig2 = plt.Figure(figsize=(6.4, 4.8), dpi=100)
+        fig2 = plt.Figure(figsize=(6.0, 4.6), dpi=100)
         ax2 = fig2.add_subplot(111)
-        if details["hit_target"].any():
-            ax2.hist(details.loc[details["hit_target"], "hit_day"], bins=range(1, 60))
-        ax2.set_title("Exit Day Distribution (Hit Target)")
-        ax2.set_xlabel("Trading day of exit")
-        ax2.set_ylabel("Count")
+        calendar_series = pd.to_numeric(details.get("calendar_days"), errors="coerce").dropna()
+        if not calendar_series.empty:
+            bins = max(int(calendar_series.max()) + 1, 10)
+            ax2.hist(calendar_series, bins=bins, color="#f4a259", alpha=0.85)
+        ax2.set_title("Calendar Days to Exit Distribution")
+        ax2.set_xlabel("Calendar days in position")
+        ax2.set_ylabel("Frequency")
         ax2.grid(True, alpha=0.3)
-        canvas2 = FigureCanvasTkAgg(fig2, master=container)
+        canvas2 = FigureCanvasTkAgg(fig2, master=charts_top)
         canvas2.draw()
-        canvas2.get_tk_widget().pack(side="right", fill="both", expand=True)
+        canvas2.get_tk_widget().pack(side="left", fill="both", expand=True)
+
+        charts_bottom = ttk.Frame(container)
+        charts_bottom.pack(fill="both", expand=True, pady=(PAD, 0))
+
+        fig3 = plt.Figure(figsize=(12.0, 4.8), dpi=100)
+        ax3 = fig3.add_subplot(111)
+        paths = self._extract_paths_array(details)
+        self._plot_pl_paths(ax3, paths)
+        if paths.size > 0:
+            ax3.set_title("P&L Progression Across Trials")
+        canvas3 = FigureCanvasTkAgg(fig3, master=charts_bottom)
+        canvas3.draw()
+        canvas3.get_tk_widget().pack(fill="both", expand=True)
 
         ttk.Button(win, text="Close", command=win.destroy).pack(side="bottom", pady=PAD)
 
@@ -1163,20 +1477,60 @@ class SimUI(tk.Tk):
         """Draw overlaid histograms with distinct colors + legend."""
         win = tk.Toplevel(self)
         win.title(f"Batch Results — {stamp_tag}")
-        win.geometry("1200x780")
+        win.geometry("1280x900")
 
         container = ttk.Frame(win, padding=PAD)
         container.pack(fill="both", expand=True)
 
-        # Qualitative palette for distinct colors (user requested distinct colors + labels)
+        table_frame = ttk.Frame(container)
+        table_frame.pack(fill="x", pady=(0, PAD))
+        columns = (
+            "ticker",
+            "contract",
+            "expiration",
+            "strike",
+            "open_price",
+            "close_price",
+            "pl_dollars",
+            "pl_percent",
+            "calendar",
+        )
+        headings = {
+            "ticker": "Ticker",
+            "contract": "Contract",
+            "expiration": "Expiration",
+            "strike": "Strike",
+            "open_price": "Open Price",
+            "close_price": "Close Price",
+            "pl_dollars": "P/L Open ($)",
+            "pl_percent": "P/L Open (%)",
+            "calendar": "Calendar",
+        }
+        tree_height = max(1, min(len(results), 6))
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=tree_height)
+        for col in columns:
+            tree.heading(col, text=headings[col])
+            anchor = "center" if col in {"ticker", "contract", "expiration", "strike"} else "e"
+            width = 120 if col in {"ticker", "contract"} else 140
+            tree.column(col, anchor=anchor, width=width, stretch=True)
+        tree.pack(fill="x")
+
+        for result in results:
+            cfg = result.get("config")
+            if cfg is None:
+                continue
+            tree.insert("", "end", values=self._compose_result_row(cfg, result["details"]))
+
+        charts_top = ttk.Frame(container)
+        charts_top.pack(fill="both", expand=True)
+
         palette = [
             "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
             "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
             "#bcbd22", "#17becf"
         ]
 
-        # --- Figure 1: Overlaid Final P&L hist
-        fig1 = plt.Figure(figsize=(6.8, 5.0), dpi=100)
+        fig1 = plt.Figure(figsize=(6.4, 4.8), dpi=100)
         ax1 = fig1.add_subplot(111)
 
         for idx, result in enumerate(results):
@@ -1184,15 +1538,15 @@ class SimUI(tk.Tk):
             option_type = result["option_type"]
             details = result["details"]
             color = palette[idx % len(palette)]
+            label = f"{result['strike']:.2f}{self._option_code(result['option_type'])}"
             ax1.hist(
-                details["final_pl"],
+                pd.to_numeric(details["final_pl"], errors="coerce").dropna(),
                 bins=70,
                 alpha=0.35,
                 label=f"{int(k)}{self._option_code(option_type)}",
                 color=color
             )
-
-        ax1.set_title("Final P&L Distribution — Overlaid by Strike")
+        ax1.set_title("Final P&L Distribution by Contract")
         ax1.set_xlabel("P&L per contract ($)")
         ax1.set_ylabel("Frequency")
         ax1.grid(True, alpha=0.3)
@@ -1202,8 +1556,7 @@ class SimUI(tk.Tk):
         canvas1.draw()
         canvas1.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(0, PAD))
 
-        # --- Figure 2: Overlaid Exit Day hist (hits only)
-        fig2 = plt.Figure(figsize=(6.8, 5.0), dpi=100)
+        fig2 = plt.Figure(figsize=(6.4, 4.8), dpi=100)
         ax2 = fig2.add_subplot(111)
 
         for idx, result in enumerate(results):
@@ -1228,7 +1581,29 @@ class SimUI(tk.Tk):
 
         canvas2 = FigureCanvasTkAgg(fig2, master=container)
         canvas2.draw()
-        canvas2.get_tk_widget().pack(side="right", fill="both", expand=True)
+        canvas2.get_tk_widget().pack(side="left", fill="both", expand=True)
+
+        charts_bottom = ttk.Frame(container)
+        charts_bottom.pack(fill="both", expand=True, pady=(PAD, 0))
+
+        fig3 = plt.Figure(figsize=(12.0, 5.0), dpi=100)
+        ax3 = fig3.add_subplot(111)
+        path_arrays = [self._extract_paths_array(res["details"]) for res in results]
+        trimmed: list[np.ndarray] = []
+        lengths = [arr.shape[1] for arr in path_arrays if arr.size > 0]
+        if lengths:
+            min_len = min(lengths)
+            for arr in path_arrays:
+                if arr.size == 0:
+                    continue
+                trimmed.append(arr[:, :min_len])
+        combined = np.vstack(trimmed) if trimmed else np.empty((0, 0))
+        self._plot_pl_paths(ax3, combined)
+        if combined.size > 0:
+            ax3.set_title("P&L Progression Across All Trials")
+        canvas3 = FigureCanvasTkAgg(fig3, master=charts_bottom)
+        canvas3.draw()
+        canvas3.get_tk_widget().pack(fill="both", expand=True)
 
         ttk.Button(win, text="Close", command=win.destroy).pack(side="bottom", pady=PAD)
 

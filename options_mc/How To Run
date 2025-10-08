@@ -1,2 +1,2 @@
-python3 -m gld_mc.cli --strike 370 --dte 46 --entry 6.80 \
+python3 -m options_mc.cli --strike 370 --dte 46 --entry 6.80 \
   --mu-mode custom --mu-custom 0.15 --iv-mode uniform --iv-min 0.17 --iv-max 0.25

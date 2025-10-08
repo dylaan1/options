@@ -1,4 +1,4 @@
-gld_mc/
+options_mc/
   __init__.py
   config.py
   pricing.py

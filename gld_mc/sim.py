@@ -36,8 +36,8 @@ def simulate(cfg: SimConfig):
     # Drift
     mu = cfg.risk_free_rate if cfg.mu_mode == "risk_neutral" else cfg.mu_custom
 
-    # Time remaining after each day
-    Ts = np.array([(trading_days - t) * dt for t in range(1, trading_days + 1)], dtype=float)
+    # Time remaining after each day (first step keeps the full time-to-expiry)
+    Ts = np.array([(trading_days - t) * dt for t in range(trading_days)], dtype=float)
 
     # Outputs
     hit_target  = np.zeros(cfg.num_trials, dtype=bool)

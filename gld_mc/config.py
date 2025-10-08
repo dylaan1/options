@@ -1,8 +1,68 @@
 from __future__ import annotations
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence
+
+
+@dataclass
+class DataProviderConfig:
+    """Runtime settings for the market data provider."""
+
+    backend: str = "mock"
+    poll_interval: float = 5.0
+    params: Dict[str, Any] = field(default_factory=dict)
+    auto_start_stream: bool = True
+    default_symbol: Optional[str] = "GLD"
+    default_option_type: str = "call"
+    default_expiration: Optional[str] = None
+    schwab: "SchwabAPIConfig | None" = None
+
+
+@dataclass
+class SchwabOAuthConfig:
+    """OAuth client configuration for Schwab connections."""
+
+    client_id: Optional[str] = field(default_factory=lambda: os.getenv("SCHWAB_CLIENT_ID"))
+    client_secret: Optional[str] = field(default_factory=lambda: os.getenv("SCHWAB_CLIENT_SECRET"))
+    redirect_uri: Optional[str] = field(default_factory=lambda: os.getenv("SCHWAB_REDIRECT_URI"))
+    scopes: Sequence[str] = (
+        "trade",
+        "move_money",
+        "read_account",
+        "market_data",
+    )
+    token_cache: Path = Path.home() / ".schwab" / "tokens.dat"
+    encryption_passphrase_env: str = "SCHWAB_TOKEN_PASSPHRASE"
+
+
+@dataclass
+class SchwabRateLimit:
+    """Throttle settings to respect Schwab API limits."""
+
+    max_requests_per_minute: int = 120
+
+
+@dataclass
+class SchwabAPIConfig:
+    """Complete Schwab configuration, including OAuth and endpoints."""
+
+    oauth: SchwabOAuthConfig = field(default_factory=SchwabOAuthConfig)
+    rate_limit: SchwabRateLimit = field(default_factory=SchwabRateLimit)
+    market_data_base: str = "https://api.schwabapi.com/marketdata/v1"
+    trader_base: str = "https://api.schwabapi.com/trader/v1"
 
 @dataclass
 class SimConfig:
+    """Simulation inputs for a single option contract scenario."""
+
+    # Instrument metadata
+    symbol: str                  = "GLD"
+    option_type: str             = "call"      # "call" or "put"
+    expiration: str | None       = None        # ISO date string when available
+    contract_multiplier: int     = 100
+    data_provider: DataProviderConfig = field(default_factory=DataProviderConfig)
+
     # Market & contract
     spot: float                  = 364.38
     strike: float                = 370.0

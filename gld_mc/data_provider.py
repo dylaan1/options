@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Protocol
 
 import numpy as np
@@ -142,12 +141,9 @@ class MockDataProvider:
             noise = self._rng.normal(0, 0.1)
             ask = max(bid + 0.05, bid + abs(noise))
             mid = (bid + ask) / 2
-            last_trade = mid + self._rng.normal(0, 0.05)
-            contract_symbol = f"{symbol.upper()}{int(round(float(strike) * 100)):05d}{option_type[0].upper()}"
             rows.append(
                 {
                     "symbol": symbol.upper(),
-                    "contract_symbol": contract_symbol,
                     "expiration": expiration,
                     "dte": dte,
                     "option_type": option_type,

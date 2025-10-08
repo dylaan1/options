@@ -72,7 +72,7 @@ class ContractCell(tk.Frame):
                 bg=self.DEFAULT_BG,
                 font=("TkDefaultFont", 9),
                 anchor="center",
-                width=9,
+                width=10,
                 padx=2,
                 pady=4,
             )
@@ -306,22 +306,55 @@ class OptionsChainViewer(ttk.Frame):
                 call_row = legs.get("call")
                 put_row = legs.get("put")
 
-                call_cell = self._create_cell(self.call_table, call_row, side="call", metrics=self.CALL_METRICS)
+                call_cell = self._create_cell(
+                    self.call_table,
+                    call_row,
+                    side="call",
+                    metrics=self.CALL_METRICS,
+                )
                 call_cell.grid(row=idx, column=0, sticky="nsew", pady=2, padx=2)
 
-                strike_text = f"{strike:.2f}"
-                lbl = tk.Label(
+                dte_value = None
+                if call_row is not None and not pd.isna(call_row.get("dte")):
+                    dte_value = call_row.get("dte")
+                elif put_row is not None and not pd.isna(put_row.get("dte")):
+                    dte_value = put_row.get("dte")
+
+                strike_cell = tk.Frame(
                     self.strike_table,
-                    text=strike_text,
-                    font=("TkDefaultFont", 10, "bold"),
-                    width=10,
+                    bd=1,
+                    relief="solid",
+                    background="white",
                     padx=4,
-                    pady=6,
+                    pady=4,
+                )
+                strike_cell.grid(row=idx, column=0, sticky="nsew", pady=2, padx=2)
+
+                strike_label = tk.Label(
+                    strike_cell,
+                    text=f"{strike:.2f}",
+                    font=("TkDefaultFont", 10, "bold"),
+                    bg="white",
                     anchor="center",
                 )
-                lbl.grid(row=idx, column=0, sticky="nsew", pady=2)
+                strike_label.pack(fill="x")
 
-                put_cell = self._create_cell(self.put_table, put_row, side="put", metrics=self.PUT_METRICS)
+                dte_label = tk.Label(
+                    strike_cell,
+                    text=self._format_dte_display(dte_value),
+                    font=("TkDefaultFont", 8),
+                    fg="#555555",
+                    bg="white",
+                    anchor="center",
+                )
+                dte_label.pack(fill="x")
+
+                put_cell = self._create_cell(
+                    self.put_table,
+                    put_row,
+                    side="put",
+                    metrics=self.PUT_METRICS,
+                )
                 put_cell.grid(row=idx, column=0, sticky="nsew", pady=2, padx=2)
 
                 self.call_table.rowconfigure(idx, weight=0)
@@ -418,6 +451,14 @@ class OptionsChainViewer(ttk.Frame):
         if self._selected_cell is not None:
             return self._selected_cell.contract
         return None
+
+    def _format_dte_display(self, value: Any) -> str:
+        if value is None or (isinstance(value, str) and not value) or pd.isna(value):
+            return "-f"
+        try:
+            return f"{int(round(float(value)))} DTE"
+        except Exception:  # noqa: BLE001
+            return "-f"
 
     def format_metric(self, column: str, value: Any) -> str:
         if value is None or (isinstance(value, str) and not value) or pd.isna(value):

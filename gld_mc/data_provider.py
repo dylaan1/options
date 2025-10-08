@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional, Protocol
 
 import numpy as np
@@ -123,58 +123,134 @@ class MockDataProvider:
         params: Optional[Dict[str, Any]] = None,
     ) -> pd.DataFrame:
         params = params or {}
-        option_type = (option_type or "call").lower()
         spot = params.get("spot") or self.get_spot(symbol)
 
         strikes = params.get("strikes")
         if not strikes:
             strikes = np.linspace(spot * 0.8, spot * 1.2, num=11)
 
-        expiration = expiration or params.get("expiration") or "2024-12-20"
-        dte = params.get("dte", 30)
         quote_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
+        # Build at least three expirations with corresponding DTE hints so
+        # dropdowns and pagination behave like the live Schwab chain.
+        base_date = datetime.now(timezone.utc).date()
+        expiration_entries: list[tuple[str, int]] = []
+        if params.get("expirations"):
+            for entry in params["expirations"]:
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    exp_str = str(entry[0])
+                    try:
+                        dte_hint = int(entry[1])
+                    except (TypeError, ValueError):
+                        dte_hint = max(_compute_dte(exp_str) or 0, 0)
+                else:
+                    exp_str = str(entry)
+                    dte_hint = max(_compute_dte(exp_str) or 0, 0)
+                expiration_entries.append((exp_str, dte_hint))
+        else:
+            offsets = params.get("dte_offsets") or (7, 21, 63)
+            for raw_offset in offsets:
+                try:
+                    offset = int(raw_offset)
+                except (TypeError, ValueError):
+                    offset = 30
+                exp_date = base_date + timedelta(days=max(offset, 0))
+                expiration_entries.append((exp_date.isoformat(), max(offset, 0)))
+
+        if not expiration_entries:
+            # Fallback to a single synthetic month if params supplied unusable data.
+            fallback_date = base_date + timedelta(days=30)
+            expiration_entries.append((fallback_date.isoformat(), 30))
+
         rows = []
-        for strike in strikes:
-            skew = 0.15 + 0.05 * (strike / spot - 1.0)
-            iv = abs(skew) + 0.18 + self._rng.normal(0, 0.01)
-            bid = max(0.05, max(spot - strike if option_type == "call" else strike - spot, 0.0))
-            noise = self._rng.normal(0, 0.1)
-            ask = max(bid + 0.05, bid + abs(noise))
-            mid = (bid + ask) / 2
-            last_trade = mid + self._rng.normal(0, 0.05)
-            contract_symbol = f"{symbol.upper()}{int(round(float(strike) * 100)):05d}{option_type[0].upper()}"
-            rows.append(
-                {
-                    "symbol": symbol.upper(),
-                    "contract_symbol": contract_symbol,
-                    "expiration": expiration,
-                    "dte": dte,
-                    "option_type": option_type,
-                    "strike": round(float(strike), 2),
-                    "bid": round(float(bid), 2),
-                    "ask": round(float(ask), 2),
-                    "mark": round(float(mid), 2),
-                    "trade_price": round(float(last_trade), 2),
-                    "last": round(float(last_trade), 2),
-                    "iv": round(float(iv), 4),
-                    "iv_percent": round(float(iv * 100.0), 2),
-                    "delta": round(float(self._rng.normal(0.45, 0.05)), 4),
-                    "gamma": round(float(self._rng.normal(0.01, 0.002)), 5),
-                    "theta": round(float(self._rng.normal(-0.03, 0.01)), 4),
-                    "vega": round(float(self._rng.normal(0.12, 0.02)), 4),
-                    "rho": round(float(self._rng.normal(0.05, 0.01)), 4),
-                    "volume": int(abs(self._rng.normal(250, 120))),
-                    "open_interest": int(abs(self._rng.normal(1200, 320))),
-                    "pl_open": round(float(self._rng.normal(0, 0.35)), 2),
-                    "pl_pct": round(float(self._rng.normal(0, 1.5)), 2),
-                    "underlying_price": round(float(spot), 2),
-                    "multiplier": 100,
-                    "quote_time": quote_time_ms,
-                }
-            )
+        for exp_date, dte_hint in expiration_entries:
+            for strike in strikes:
+                skew = 0.15 + 0.05 * (strike / spot - 1.0)
+                iv_call = abs(skew) + 0.18 + self._rng.normal(0, 0.01)
+                iv_put = abs(skew) + 0.19 + self._rng.normal(0, 0.01)
+
+                # Price scaffolding for call
+                call_intrinsic = max(spot - strike, 0.0)
+                call_bid = max(0.05, call_intrinsic + self._rng.normal(0, 0.1))
+                call_ask = max(call_bid + 0.05, call_bid + abs(self._rng.normal(0, 0.1)))
+                call_mid = (call_bid + call_ask) / 2
+                call_last = call_mid + self._rng.normal(0, 0.05)
+
+                # Price scaffolding for put
+                put_intrinsic = max(strike - spot, 0.0)
+                put_bid = max(0.05, put_intrinsic + self._rng.normal(0, 0.1))
+                put_ask = max(put_bid + 0.05, put_bid + abs(self._rng.normal(0, 0.1)))
+                put_mid = (put_bid + put_ask) / 2
+                put_last = put_mid + self._rng.normal(0, 0.05)
+
+                strike_val = round(float(strike), 2)
+
+                rows.append(
+                    {
+                        "symbol": symbol.upper(),
+                        "contract_symbol": f"{symbol.upper()}{int(round(strike_val * 100)):05d}C",
+                        "expiration": exp_date,
+                        "dte": dte_hint,
+                        "option_type": "call",
+                        "strike": strike_val,
+                        "bid": round(float(call_bid), 2),
+                        "ask": round(float(call_ask), 2),
+                        "mark": round(float(call_mid), 2),
+                        "trade_price": round(float(call_last), 2),
+                        "last": round(float(call_last), 2),
+                        "iv": round(float(iv_call), 4),
+                        "iv_percent": round(float(iv_call * 100.0), 2),
+                        "delta": round(float(self._rng.normal(0.55, 0.06)), 4),
+                        "gamma": round(float(self._rng.normal(0.011, 0.002)), 5),
+                        "theta": round(float(self._rng.normal(-0.025, 0.01)), 4),
+                        "vega": round(float(self._rng.normal(0.13, 0.02)), 4),
+                        "rho": round(float(self._rng.normal(0.05, 0.01)), 4),
+                        "volume": int(abs(self._rng.normal(260, 120))),
+                        "open_interest": int(abs(self._rng.normal(1350, 320))),
+                        "pl_open": round(float(self._rng.normal(0, 0.35)), 2),
+                        "pl_pct": round(float(self._rng.normal(0, 1.5)), 2),
+                        "underlying_price": round(float(spot), 2),
+                        "multiplier": 100,
+                        "quote_time": quote_time_ms,
+                    }
+                )
+
+                rows.append(
+                    {
+                        "symbol": symbol.upper(),
+                        "contract_symbol": f"{symbol.upper()}{int(round(strike_val * 100)):05d}P",
+                        "expiration": exp_date,
+                        "dte": dte_hint,
+                        "option_type": "put",
+                        "strike": strike_val,
+                        "bid": round(float(put_bid), 2),
+                        "ask": round(float(put_ask), 2),
+                        "mark": round(float(put_mid), 2),
+                        "trade_price": round(float(put_last), 2),
+                        "last": round(float(put_last), 2),
+                        "iv": round(float(iv_put), 4),
+                        "iv_percent": round(float(iv_put * 100.0), 2),
+                        "delta": round(float(self._rng.normal(-0.45, 0.06)), 4),
+                        "gamma": round(float(self._rng.normal(0.011, 0.002)), 5),
+                        "theta": round(float(self._rng.normal(-0.02, 0.01)), 4),
+                        "vega": round(float(self._rng.normal(0.11, 0.02)), 4),
+                        "rho": round(float(self._rng.normal(-0.04, 0.01)), 4),
+                        "volume": int(abs(self._rng.normal(240, 120))),
+                        "open_interest": int(abs(self._rng.normal(1250, 320))),
+                        "pl_open": round(float(self._rng.normal(0, 0.35)), 2),
+                        "pl_pct": round(float(self._rng.normal(0, 1.5)), 2),
+                        "underlying_price": round(float(spot), 2),
+                        "multiplier": 100,
+                        "quote_time": quote_time_ms,
+                    }
+                )
 
         df = pd.DataFrame(rows)
+        if expiration:
+            df = df[df["expiration"] == expiration]
+        if option_type:
+            df = df[df["option_type"] == option_type.lower()]
+
         df = df.sort_values("strike").reset_index(drop=True)
         df.attrs["underlying_price"] = float(spot)
         return df

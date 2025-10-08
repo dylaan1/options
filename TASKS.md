@@ -2,49 +2,10 @@
 
 Below are the four highest-priority follow-ups. Use the **View task** links to jump directly to implementation notes for each item.
 
-- [ ] Task 1: Fix Schwab chain flattening ([View task](#task-1-fix-schwab-chain-flattening))
-- [ ] Task 2: Expand mock data coverage ([View task](#task-2-expand-mock-data-coverage))
-- [ ] Task 3: Align chain viewer metrics ([View task](#task-3-align-chain-viewer-metrics))
 - [ ] Task 4: Finalize progression chart styling ([View task](#task-4-finalize-progression-chart-styling))
-
----
-
-## Task 1: Fix Schwab chain flattening
-- **Objective:** Ensure call and put legs share the same expiration key without overwriting each other when flattening Schwab option-chain payloads.
-- **Why it matters:** The UI’s mirrored matrix currently loses either the call or put side for expirations returned in both maps, leaving half of the chain blank even with live data.
-- **Key steps:**
-  - Iterate the `callExpDateMap` and `putExpDateMap` separately, tagging each row with its option type.
-  - Preserve the original expiration/DTE hints while deduplicating strike values.
-  - Add a regression-friendly unit test (or doctest) that feeds a minimal Schwab payload with both legs and verifies both appear in the resulting DataFrame.
-- **Status:** ⏳ Pending implementation.
-
-[Back to top](#next-tasks)
-
----
-
-## Task 2: Expand mock data coverage
-- **Objective:** Update the mock provider so offline runs mimic Schwab’s structure with paired call/put rows across multiple expirations.
-- **Why it matters:** The UI should remain fully functional during development demos without live credentials; today the mock chain only populates a single option type, leaving the matrix asymmetric.
-- **Key steps:**
-  - Generate both call and put legs for every strike produced by the mock RNG.
-  - Include at least two expirations and corresponding DTE hints so the expiration dropdown and matrix pagination can be exercised.
-  - Ensure placeholder fields (`trade_price`, `pl_open`, `pl_pct`, etc.) are populated so formatting stays consistent with live data.
-- **Status:** ⏳ Pending implementation.
-
-[Back to top](#next-tasks)
-
----
-
-## Task 3: Align chain viewer metrics
-- **Objective:** Bring the displayed columns in `OptionsChainViewer` in line with the requested layout (Mark ↔ IV %, Trade Price, P/L Open, P/L %, Delta, Theta, Vega, Volume, Open Interest, and shared DTE alongside strikes).
-- **Why it matters:** The current column set omits several broker-style metrics, reducing the usefulness of the live chain for decision making.
-- **Key steps:**
-  - Redefine the call/put metric lists so they mirror each other around the strike column while including the requested data points.
-  - Surface DTE in the central strike panel (e.g., stacked label or combined text) while keeping the strike anchored.
-  - Verify the formatting helper continues to render `-f` when data is missing and adjust column widths if necessary.
-- **Status:** ⏳ Pending implementation.
-
-[Back to top](#next-tasks)
+- [ ] Task 5: Implement Schwab token refresh & throttling ([View task](#task-5-implement-schwab-token-refresh--throttling))
+- [ ] Task 6: Harden streaming/UI error handling ([View task](#task-6-harden-streamingui-error-handling))
+- [ ] Task 7: Extend CLI outputs with new analytics ([View task](#task-7-extend-cli-outputs-with-new-analytics))
 
 ---
 
@@ -61,7 +22,49 @@ Below are the four highest-priority follow-ups. Use the **View task** links to j
 
 ---
 
+## Task 5: Implement Schwab token refresh & throttling
+- **Objective:** Wire up refresh-token handling and client-side rate limiting for the Schwab REST adapter.
+- **Why it matters:** The REST scaffold currently expects pre-minted tokens and does not guard against the 120-requests-per-minute limit, so live polling may fail once access tokens expire or rate caps are hit.
+- **Key steps:**
+  - Persist the encrypted refresh token, add helpers to request new access tokens, and rotate them transparently before expiry.
+  - Track request timestamps inside `SchwabRESTClient` and sleep/back off when approaching Schwab’s 120-request limit.
+  - Surface credential or throttling errors through the UI status banner so users know when to re-authenticate.
+- **Status:** ⏳ Pending implementation.
+
+[Back to top](#next-tasks)
+
+---
+
+## Task 6: Harden streaming/UI error handling
+- **Objective:** Improve resiliency around the live chain stream and UI interactions.
+- **Why it matters:** Network hiccups or parsing errors currently bubble straight to logs; the UI should present actionable status updates and attempt automatic recovery when feasible.
+- **Key steps:**
+  - Add retry/backoff logic to the `QuoteStreamHandle` loop and surface errors via banner text in the chain viewer.
+  - Guard UI callbacks against missing data (e.g., selected contract disappears between refreshes) with user-friendly dialogs.
+  - Capture provider exceptions in telemetry/logging so failures can be triaged post-mortem.
+- **Status:** ⏳ Pending implementation.
+
+[Back to top](#next-tasks)
+
+---
+
+## Task 7: Extend CLI outputs with new analytics
+- **Objective:** Bring the CLI’s CSV/plot outputs to parity with the UI enhancements.
+- **Why it matters:** The CLI still exports the legacy column set and lacks the progression chart/exit-time visuals introduced in the UI, limiting scripted workflows.
+- **Key steps:**
+  - Include ticker, option type, expiration, open/close prices, dollar & percent P/L, and calendar days in CLI summaries.
+  - Generate the same P&L and holding-period histograms plus the progression overlay when running in batch mode (saving to files).
+  - Document the new artifacts in the README so automated users know where to find them.
+- **Status:** ⏳ Pending implementation.
+
+[Back to top](#next-tasks)
+
+---
+
 ## Completed Work
+- ✅ Task 1: Fix Schwab chain flattening.
+- ✅ Task 2: Expand mock data coverage.
+- ✅ Task 3: Align chain viewer metrics.
 - ✅ Pluggable market-data layer with Schwab OAuth support and encrypted token storage.
 - ✅ Tkinter UI overhaul with mirrored call/put matrix, symbol history, and simulation auto-population.
 - ✅ Monte Carlo engine upgrades for put pricing, per-path P&L capture, and enhanced reporting outputs.

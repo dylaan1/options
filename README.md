@@ -23,10 +23,10 @@ market-data layer with live Schwab integration and a Tkinter desktop UI.
    Set the following environment variables (replace with your Schwab app metadata):
 
    ```bash
-   export SCHWAB_CLIENT_ID="cKMzVrV2jbAdnWpmGgfsTBTrnxPZ4wo2"
-   export SCHWAB_CLIENT_SECRET="UGKViwdPN2AGnLYS"
-   export SCHWAB_REDIRECT_URI="https://127.0.0.1:5000/callback"
-   export SCHWAB_TOKEN_PASSPHRASE="choose-a-strong-passphrase"
+   export SCHWAB_CLIENT_ID={YOUR_CLIENT_ID}
+   export SCHWAB_CLIENT_SECRET={YOUR_SECRET_KEY}
+   export SCHWAB_REDIRECT_URI={YOUR_CALLBACK_URL}
+   export SCHWAB_TOKEN_PASSPHRASE={YOUR_TOKEN_PASSPHRASE}
    ```
 
    Alternatively, populate these values directly on `DataProviderConfig.schwab.oauth`. The passphrase is

@@ -54,32 +54,44 @@ class ContractCell(tk.Frame):
             contract = pd.Series(contract)
         self.contract: pd.Series | None = contract.copy() if isinstance(contract, pd.Series) else None
         self.side = side
+        self.metrics = metrics
+        self.labels: list[tk.Label] = []
         self.key = contract_key(self.contract) if self.contract is not None else None
 
-        text = self._build_text()
-        self.label = tk.Label(
-            self,
-            text=text,
-            justify="left",
-            anchor="nw",
-            bg=self.DEFAULT_BG,
-            font=("TkDefaultFont", 9),
-        )
-        self.label.pack(fill="both", expand=True, padx=6, pady=4)
+        for idx in range(len(metrics)):
+            self.columnconfigure(idx, weight=1)
+
+        for idx, (_label, column) in enumerate(metrics):
+            value = None
+            if self.contract is not None:
+                value = self.contract.get(column)
+            text = self.viewer.format_metric(column, value)
+            lbl = tk.Label(
+                self,
+                text=text,
+                bg=self.DEFAULT_BG,
+                font=("TkDefaultFont", 9),
+                anchor="center",
+                width=9,
+                padx=2,
+                pady=4,
+            )
+            lbl.grid(row=0, column=idx, sticky="nsew", padx=1, pady=1)
+            if self.contract is not None:
+                lbl.bind("<Button-1>", self._on_click)
+                lbl.bind("<Double-Button-1>", self._on_double_click)
+            self.labels.append(lbl)
 
         if self.contract is not None:
-            for widget in (self, self.label):
-                widget.bind("<Button-1>", self._on_click)
-                widget.bind("<Double-Button-1>", self._on_double_click)
+            self.bind("<Button-1>", self._on_click)
+            self.bind("<Double-Button-1>", self._on_double_click)
 
-    def _build_text(self) -> str:
-        metrics = self.viewer.metrics
-        header = (self.contract.get("option_type") if self.contract is not None else self.side).upper()
-        lines = [header]
-        for label, column in metrics:
-            value = self.contract.get(column) if self.contract is not None else None
-            lines.append(f"{label}: {self.viewer.format_metric(column, value)}")
-        return "\n".join(lines)
+    def update_values(self, contract: pd.Series | None) -> None:
+        self.contract = contract.copy() if isinstance(contract, pd.Series) else None
+        self.key = contract_key(self.contract) if self.contract is not None else None
+        for lbl, (_label, column) in zip(self.labels, self.metrics):
+            value = None if self.contract is None else self.contract.get(column)
+            lbl.configure(text=self.viewer.format_metric(column, value))
 
     def set_selected(self, selected: bool) -> None:
         if selected:
@@ -89,10 +101,12 @@ class ContractCell(tk.Frame):
                 highlightcolor=self.SELECT_BORDER,
                 background=self.SELECT_BG,
             )
-            self.label.configure(bg=self.SELECT_BG)
+            for lbl in self.labels:
+                lbl.configure(bg=self.SELECT_BG)
         else:
             self.configure(highlightthickness=0, background=self.DEFAULT_BG)
-            self.label.configure(bg=self.DEFAULT_BG)
+            for lbl in self.labels:
+                lbl.configure(bg=self.DEFAULT_BG)
 
     def _on_click(self, _event) -> None:
         self.viewer._handle_cell_click(self, double=False)
@@ -420,19 +434,6 @@ class OptionsChainViewer(ttk.Frame):
                 if abs(pct) < 1:
                     pct *= 100.0
                 return f"{pct:.2f}%"
-            if column == "dte":
-                return f"{int(round(float(value)))}"
-            if column in {"mark", "trade_price", "pl_open"}:
-                return f"{float(value):.2f}"
-            if column in {"pl_pct", "iv_percent"}:
-                pct = float(value)
-                if column == "iv_percent" and abs(pct) < 1:
-                    pct *= 100.0
-                return f"{pct:.2f}%"
-            if column in {"delta", "theta", "vega"}:
-                return f"{float(value):.4f}"
-            if column in {"volume", "open_interest"}:
-                return f"{int(round(float(value)))}"
         except Exception:  # noqa: BLE001
             return str(value)
         return str(value)
@@ -488,8 +489,10 @@ class SimUI(tk.Tk):
         self.var_symbol = tk.StringVar(value=default_symbol)
         self.var_option_type = tk.StringVar(value=self.data_settings.default_option_type)
         self.var_expiration = tk.StringVar(value=self.data_settings.default_expiration or "")
+        if default_symbol:
+            self._record_recent_symbol(default_symbol)
 
-        self._add_labeled_entry(isec, "Symbol", self.var_symbol, 0, 0)
+        self._add_symbol_input(isec, "Symbol", self.var_symbol, 0, 0)
         self._add_combo(isec, "Option type", self.var_option_type, ["call", "put"], 0, 1)
         self._add_labeled_entry(isec, "Expiration (YYYY-MM-DD)", self.var_expiration, 1, 0)
         mult_frame = ttk.Frame(isec)
@@ -624,7 +627,7 @@ class SimUI(tk.Tk):
         self.b_option_type = tk.StringVar(value=self.data_settings.default_option_type)
         self.b_expiration = tk.StringVar(value=self.data_settings.default_expiration or "")
 
-        self._add_labeled_entry(b_inst, "Symbol", self.b_symbol, 0, 0)
+        self._add_symbol_input(b_inst, "Symbol", self.b_symbol, 0, 0)
         self._add_combo(b_inst, "Option type", self.b_option_type, ["call", "put"], 0, 1)
         self._add_labeled_entry(b_inst, "Expiration (YYYY-MM-DD)", self.b_expiration, 1, 0)
         mult_frame = ttk.Frame(b_inst)
@@ -719,7 +722,8 @@ class SimUI(tk.Tk):
     # ======= Market data =======
     def _start_chain_stream(self) -> None:
         symbol = self.var_symbol.get().strip().upper() or (self.data_settings.default_symbol or "GLD")
-        expiration = self.var_expiration.get().strip() or None
+        self._record_recent_symbol(symbol)
+        expiration = None
         option_filter = None
 
         params = dict(self.data_settings.params) if self.data_settings.params else {}
@@ -736,7 +740,6 @@ class SimUI(tk.Tk):
         if self._chain_exp_combo is not None:
             self._chain_exp_combo.configure(values=[])
         self._last_chain_timestamp = None
-        self.chain_view.clear_selection()
 
         try:
             self._chain_handle = self.data_provider.stream_option_chain(
@@ -1189,6 +1192,160 @@ class SimUI(tk.Tk):
         ttk.Label(frm, text=label).pack(side="top", anchor="w")
         ttk.Combobox(frm, textvariable=var, values=values, width=18, state="readonly").pack(side="top", anchor="w")
 
+    def _on_symbol_combo_selected(self, var: tk.StringVar) -> None:
+        value = var.get().strip().upper()
+        if value:
+            var.set(value)
+            self._record_recent_symbol(value)
+
+    def _record_recent_symbol(self, symbol: str) -> None:
+        sym = symbol.strip().upper()
+        if not sym:
+            return
+        if sym in self._recent_symbols:
+            self._recent_symbols.remove(sym)
+        self._recent_symbols.insert(0, sym)
+        self._recent_symbols = self._recent_symbols[:12]
+        for combo in self._symbol_inputs:
+            combo.configure(values=self._recent_symbols)
+
+    @staticmethod
+    def _format_price(value: Any) -> str:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return "-f"
+        if not np.isfinite(val):
+            return "-f"
+        return f"{val:.2f}"
+
+    @staticmethod
+    def _format_money(value: Any) -> str:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return "-f"
+        if not np.isfinite(val):
+            return "-f"
+        return f"${val:,.2f}"
+
+    @staticmethod
+    def _format_percent_value(value: Any) -> str:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return "-f"
+        if not np.isfinite(val):
+            return "-f"
+        return f"{val:.2f}%"
+
+    @staticmethod
+    def _format_calendar(value: Any) -> str:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return "-f"
+        if not np.isfinite(val):
+            return "-f"
+        return f"{val:.2f}"
+
+    def _compose_result_row(self, cfg: SimConfig, details: pd.DataFrame) -> tuple[str, ...]:
+        expiration = (cfg.expiration or "n/a").replace("-", "/")
+        contract = cfg.option_type.upper()
+        ticker = cfg.symbol.upper()
+        strike = f"{cfg.strike:.2f}"
+
+        exit_series = pd.to_numeric(details.get("exit_price"), errors="coerce") if "exit_price" in details.columns else pd.Series(dtype=float)
+        final_pl_series = pd.to_numeric(details.get("final_pl"), errors="coerce") if "final_pl" in details.columns else pd.Series(dtype=float)
+        pl_percent_series = pd.to_numeric(details.get("pl_percent"), errors="coerce") if "pl_percent" in details.columns else pd.Series(dtype=float)
+        calendar_series = pd.to_numeric(details.get("calendar_days"), errors="coerce") if "calendar_days" in details.columns else pd.Series(dtype=float)
+
+        close_price = exit_series.mean(skipna=True) if not exit_series.empty else float("nan")
+        pl_dollars = final_pl_series.mean(skipna=True) if not final_pl_series.empty else float("nan")
+        pl_percent = (pl_percent_series.mean(skipna=True) * 100.0) if not pl_percent_series.empty else float("nan")
+        calendar_days = calendar_series.mean(skipna=True) if not calendar_series.empty else float("nan")
+
+        return (
+            ticker,
+            contract,
+            expiration,
+            strike,
+            self._format_price(cfg.entry_price),
+            self._format_price(close_price),
+            self._format_money(pl_dollars),
+            self._format_percent_value(pl_percent),
+            self._format_calendar(calendar_days),
+        )
+
+    @staticmethod
+    def _extract_paths_array(details: pd.DataFrame) -> np.ndarray:
+        if "pl_path" not in details.columns:
+            return np.empty((0, 0))
+        raw = details["pl_path"]
+        if raw.empty:
+            return np.empty((0, 0))
+        arrays: list[np.ndarray] = []
+        for path in raw:
+            if path is None:
+                continue
+            try:
+                arr = np.asarray(path, dtype=float)
+            except Exception:  # noqa: BLE001
+                continue
+            if arr.size > 0:
+                arrays.append(arr)
+        if not arrays:
+            return np.empty((0, 0))
+        return np.vstack(arrays)
+
+    def _plot_pl_paths(self, ax, path_array: np.ndarray) -> None:
+        ax.clear()
+        fig = ax.figure
+        fig.patch.set_facecolor("#2b2b2b")
+        ax.set_facecolor("#2b2b2b")
+        if path_array.size == 0:
+            ax.set_title("P&L Progression (no data)", color="#f8e5c1")
+            for spine in ax.spines.values():
+                spine.set_color("#d99a6c")
+            ax.tick_params(colors="#f8e5c1")
+            ax.set_xlabel("Trading day", color="#f8e5c1")
+            ax.set_ylabel("P&L per contract ($)", color="#f8e5c1")
+            return
+
+        x = np.arange(1, path_array.shape[1] + 1)
+        for path in path_array:
+            ax.plot(x, path, color="#800000", alpha=0.1, linewidth=0.8)
+
+        mean_path = np.nanmean(path_array, axis=0)
+        std_path = np.nanstd(path_array, axis=0)
+        ci = 1.96 * std_path / np.sqrt(max(path_array.shape[0], 1))
+
+        ax.plot(x, mean_path, color="#daa520", linewidth=2.2)
+        ax.plot(x, mean_path + ci, color="#800080", linestyle="--", linewidth=1.2)
+        ax.plot(x, mean_path - ci, color="#800080", linestyle="--", linewidth=1.2)
+
+        for spine in ax.spines.values():
+            spine.set_color("#d99a6c")
+        ax.tick_params(colors="#f8e5c1")
+        ax.xaxis.label.set_color("#f8e5c1")
+        ax.yaxis.label.set_color("#f8e5c1")
+        ax.title.set_color("#f8e5c1")
+
+        ax.set_xlabel("Trading day")
+        ax.set_ylabel("P&L per contract ($)")
+
+        y_extent = np.nanmax(np.abs(path_array))
+        if not np.isfinite(y_extent) or y_extent <= 0:
+            y_extent = 1.0
+        for frac in np.linspace(0.1, 1.0, 10):
+            level = frac * y_extent
+            ax.axhline(level, color="#666666", linestyle="--", linewidth=0.5, alpha=0.4)
+            ax.axhline(-level, color="#666666", linestyle="--", linewidth=0.3, alpha=0.25)
+
+        ax.axhline(0, color="#d99a6c", linewidth=1.0)
+        ax.axvline(x[0], color="#d99a6c", linewidth=1.0)
+        ax.set_xlim(x[0], x[-1])
+
     @staticmethod
     def _option_code(option_type: str) -> str:
         return {"call": "C", "put": "P"}.get(option_type.lower(), option_type.upper())
@@ -1474,7 +1631,6 @@ class SimUI(tk.Tk):
         ttk.Button(win, text="Close", command=win.destroy).pack(side="bottom", pady=PAD)
 
     def _show_results_window_batch(self, results, stamp_tag: str):
-        """Draw overlaid histograms with distinct colors + legend."""
         win = tk.Toplevel(self)
         win.title(f"Batch Results — {stamp_tag}")
         win.geometry("1280x900")
@@ -1532,10 +1688,7 @@ class SimUI(tk.Tk):
 
         fig1 = plt.Figure(figsize=(6.4, 4.8), dpi=100)
         ax1 = fig1.add_subplot(111)
-
         for idx, result in enumerate(results):
-            k = result["strike"]
-            option_type = result["option_type"]
             details = result["details"]
             color = palette[idx % len(palette)]
             label = f"{result['strike']:.2f}{self._option_code(result['option_type'])}"
@@ -1543,43 +1696,45 @@ class SimUI(tk.Tk):
                 pd.to_numeric(details["final_pl"], errors="coerce").dropna(),
                 bins=70,
                 alpha=0.35,
-                label=f"{int(k)}{self._option_code(option_type)}",
-                color=color
+                label=label,
+                color=color,
             )
         ax1.set_title("Final P&L Distribution by Contract")
         ax1.set_xlabel("P&L per contract ($)")
         ax1.set_ylabel("Frequency")
         ax1.grid(True, alpha=0.3)
-        ax1.legend(title="Strike/Type")
-
-        canvas1 = FigureCanvasTkAgg(fig1, master=container)
+        handles, labels = ax1.get_legend_handles_labels()
+        if handles:
+            ax1.legend(title="Strike/Type")
+        canvas1 = FigureCanvasTkAgg(fig1, master=charts_top)
         canvas1.draw()
         canvas1.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(0, PAD))
 
         fig2 = plt.Figure(figsize=(6.4, 4.8), dpi=100)
         ax2 = fig2.add_subplot(111)
-
         for idx, result in enumerate(results):
-            k = result["strike"]
-            option_type = result["option_type"]
             details = result["details"]
             color = palette[idx % len(palette)]
-            if details["hit_target"].any():
-                ax2.hist(
-                    details.loc[details["hit_target"], "hit_day"],
-                    bins=range(1, 60),
-                    alpha=0.45,
-                    label=f"{int(k)}{self._option_code(option_type)}",
-                    color=color
-                )
-
-        ax2.set_title("Exit Day Distribution (Hit Target) — Overlaid by Strike")
-        ax2.set_xlabel("Trading day of exit")
-        ax2.set_ylabel("Count")
+            label = f"{result['strike']:.2f}{self._option_code(result['option_type'])}"
+            calendar_series = pd.to_numeric(details.get("calendar_days"), errors="coerce").dropna()
+            if calendar_series.empty:
+                continue
+            bins = max(int(calendar_series.max()) + 1, 10)
+            ax2.hist(
+                calendar_series,
+                bins=bins,
+                alpha=0.4,
+                label=label,
+                color=color,
+            )
+        ax2.set_title("Calendar Days to Exit by Contract")
+        ax2.set_xlabel("Calendar days in position")
+        ax2.set_ylabel("Frequency")
         ax2.grid(True, alpha=0.3)
-        ax2.legend(title="Strike/Type")
-
-        canvas2 = FigureCanvasTkAgg(fig2, master=container)
+        handles, labels = ax2.get_legend_handles_labels()
+        if handles:
+            ax2.legend(title="Strike/Type")
+        canvas2 = FigureCanvasTkAgg(fig2, master=charts_top)
         canvas2.draw()
         canvas2.get_tk_widget().pack(side="left", fill="both", expand=True)
 

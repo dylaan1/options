@@ -1,63 +1,67 @@
 # Next Tasks
 
-Below is the prioritized queue of work items to continue generalizing the simulator. Check each item off as it is completed. Use the **View task** links to jump directly to detailed notes for that task.
+Below are the four highest-priority follow-ups. Use the **View task** links to jump directly to implementation notes for each item.
 
-- [x] Task 1: Data provider abstraction ([View task](#task-1-data-provider-abstraction))
-- [ ] Task 2: Simulation input plumbing ([View task](#task-2-simulation-input-plumbing))
-- [ ] Task 3: Live volatility integration ([View task](#task-3-live-volatility-integration))
-- [ ] Task 4: CLI/UX polish ([View task](#task-4-cliux-polish))
+- [ ] Task 1: Fix Schwab chain flattening ([View task](#task-1-fix-schwab-chain-flattening))
+- [ ] Task 2: Expand mock data coverage ([View task](#task-2-expand-mock-data-coverage))
+- [ ] Task 3: Align chain viewer metrics ([View task](#task-3-align-chain-viewer-metrics))
+- [ ] Task 4: Finalize progression chart styling ([View task](#task-4-finalize-progression-chart-styling))
 
 ---
 
-## Task 1: Data provider abstraction
-- **Objective:** Introduce a pluggable data-access layer that can load spot prices and option chains from Schwab or a mock source for offline testing.
+## Task 1: Fix Schwab chain flattening
+- **Objective:** Ensure call and put legs share the same expiration key without overwriting each other when flattening Schwab option-chain payloads.
+- **Why it matters:** The UI’s mirrored matrix currently loses either the call or put side for expirations returned in both maps, leaving half of the chain blank even with live data.
 - **Key steps:**
-  - Define an interface (e.g., `DataProvider`) responsible for fetching spot, option quotes, and contract metadata.
-  - Implement a Schwab-backed provider that authenticates, requests the option chain, and maps results to the simulator schema.
-  - Provide an in-memory/mock provider for unit tests and demos.
-  - Add configuration hooks so the simulator selects a provider at runtime.
-- **Status:** ✅ Framework in place with `MarketDataProvider` protocol, a refresh-aware Schwab REST client with encrypted token storage, polling stream handle, mock generator, and UI integration that streams the chain into a live table. Complete the initial OAuth handshake (see README) to populate the encrypted cache before using the Schwab backend.
+  - Iterate the `callExpDateMap` and `putExpDateMap` separately, tagging each row with its option type.
+  - Preserve the original expiration/DTE hints while deduplicating strike values.
+  - Add a regression-friendly unit test (or doctest) that feeds a minimal Schwab payload with both legs and verifies both appear in the resulting DataFrame.
+- **Status:** ⏳ Pending implementation.
 
-[View task](#next-tasks)
-
----
-
-## Task 2: Simulation input plumbing
-- **Objective:** Let users select a contract from the live option chain and have the simulator forms auto-populate with that contract's strike, expiration, mark price, implied volatility, and DTE.
-- **Key information needed:**
-  - Preferred UI gesture for selecting a contract (row click, double-click, or a dedicated "Use in simulation" button).
-  - Mapping between chain columns and simulation inputs (e.g., `markPrice` → entry, `bidPrice`/`askPrice` averages, which IV field to trust, multiplier handling).
-  - Fallback behavior when the chain omits a value (use manual overrides, compute DTE from expiration, prompt the user, etc.).
-  - Whether batch runs should also accept auto-populated rows or only single-run forms.
-- **Implementation steps:**
-  - Wire the `OptionsChainViewer` selection callback to capture the selected row's data.
-  - Normalize the row into a `SimConfig`-compatible payload, applying any fallbacks.
-  - Update the single-run form fields in the UI (and CLI defaults where appropriate).
-  - Record the auto-populated metadata in simulation summaries for auditability.
-- **Status:** 🚧 Pending clarification from the user on the interaction flow and fallback rules noted above.
-
-[View task](#next-tasks)
+[Back to top](#next-tasks)
 
 ---
 
-## Task 3: Live volatility integration
-- **Objective:** Replace fixed IV inputs with real-time implied volatility from the option chain, while retaining overrides for scenario testing.
+## Task 2: Expand mock data coverage
+- **Objective:** Update the mock provider so offline runs mimic Schwab’s structure with paired call/put rows across multiple expirations.
+- **Why it matters:** The UI should remain fully functional during development demos without live credentials; today the mock chain only populates a single option type, leaving the matrix asymmetric.
 - **Key steps:**
-  - Extend the configuration to accept per-contract IV sourced from the data provider.
-  - Add fallbacks when IV is missing, including historical or user-specified values.
-  - Surface controls to bias or stress-test volatility (e.g., +/- percentage adjustments).
-  - Ensure simulation reporting logs the IV source and adjustments used.
+  - Generate both call and put legs for every strike produced by the mock RNG.
+  - Include at least two expirations and corresponding DTE hints so the expiration dropdown and matrix pagination can be exercised.
+  - Ensure placeholder fields (`trade_price`, `pl_open`, `pl_pct`, etc.) are populated so formatting stays consistent with live data.
+- **Status:** ⏳ Pending implementation.
 
-[View task](#next-tasks)
+[Back to top](#next-tasks)
 
 ---
 
-## Task 4: CLI/UX polish
-- **Objective:** Streamline the CLI so users can select contracts interactively and review scenario outputs across multiple tickers.
+## Task 3: Align chain viewer metrics
+- **Objective:** Bring the displayed columns in `OptionsChainViewer` in line with the requested layout (Mark ↔ IV %, Trade Price, P/L Open, P/L %, Delta, Theta, Vega, Volume, Open Interest, and shared DTE alongside strikes).
+- **Why it matters:** The current column set omits several broker-style metrics, reducing the usefulness of the live chain for decision making.
 - **Key steps:**
-  - Add commands/subcommands to list available expirations/strikes pulled from the data provider.
-  - Provide presets for common strategies (single-leg, spreads) while keeping manual overrides.
-  - Improve output formatting (tables/plots) and allow exporting CSV/JSON summaries.
-  - Document CLI usage examples that cover both calls and puts.
+  - Redefine the call/put metric lists so they mirror each other around the strike column while including the requested data points.
+  - Surface DTE in the central strike panel (e.g., stacked label or combined text) while keeping the strike anchored.
+  - Verify the formatting helper continues to render `-f` when data is missing and adjust column widths if necessary.
+- **Status:** ⏳ Pending implementation.
 
-[View task](#next-tasks)
+[Back to top](#next-tasks)
+
+---
+
+## Task 4: Finalize progression chart styling
+- **Objective:** Finish the requested styling for the P&L progression overlay chart in the results windows.
+- **Why it matters:** The current implementation uses horizontal guides and resets axis colors after styling, so the visualization still diverges from the spec.
+- **Key steps:**
+  - Replace horizontal guide lines with vertical semi-axis lines spaced every 10 % across the x-axis range.
+  - Set the titanium light-orange axis line colors after updating axis labels so the styling persists.
+  - Double-check the maroon, goldenrod, and purple color assignments and document the palette in code comments for future reference.
+- **Status:** ⏳ Pending implementation.
+
+[Back to top](#next-tasks)
+
+---
+
+## Completed Work
+- ✅ Pluggable market-data layer with Schwab OAuth support and encrypted token storage.
+- ✅ Tkinter UI overhaul with mirrored call/put matrix, symbol history, and simulation auto-population.
+- ✅ Monte Carlo engine upgrades for put pricing, per-path P&L capture, and enhanced reporting outputs.

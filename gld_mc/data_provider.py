@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Protocol
 
 import numpy as np
@@ -324,73 +325,96 @@ class SchwabDataProvider:
 
         rows = []
         underlying_symbol = (raw.get("symbol") or "").upper()
-        expirations = raw.get("callExpDateMap", {}) | raw.get("putExpDateMap", {})
-        for expiration, strikes in expirations.items():
-            # Schwab expiration keys look like "2024-12-20:30" (date:DTE)
-            exp_parts = expiration.split(":")
-            exp_date = exp_parts[0]
-            dte_hint = int(exp_parts[1]) if len(exp_parts) > 1 and exp_parts[1].isdigit() else None
-            for strike, contracts in strikes.items():
-                for contract in contracts:
-                    option_type = contract.get("putCall", "").lower()
-                    quote_time = contract.get("quoteTimeInLong") or contract.get("quoteTime")
-                    resolved_dte = contract.get("daysToExpiration") or dte_hint
-                    if resolved_dte in (None, ""):
-                        resolved_dte = _compute_dte(
-                            contract.get("expirationDate") or exp_date,
-                            quote_time,
+
+        def process_leg(leg_key: str, default_option_type: str) -> None:
+            leg_map = raw.get(leg_key, {}) or {}
+            for expiration, strikes in leg_map.items():
+                # Schwab expiration keys look like "2024-12-20:30" (date:DTE)
+                exp_parts = expiration.split(":")
+                exp_date = exp_parts[0]
+                dte_hint = (
+                    int(exp_parts[1])
+                    if len(exp_parts) > 1 and exp_parts[1].isdigit()
+                    else None
+                )
+
+                for strike_key, contracts in (strikes or {}).items():
+                    strike_hint: Optional[float] = None
+                    try:
+                        strike_hint = float(strike_key)
+                    except (TypeError, ValueError):
+                        strike_hint = None
+
+                    for contract in contracts or []:
+                        option_type = (contract.get("putCall") or default_option_type).lower()
+                        quote_time = contract.get("quoteTimeInLong") or contract.get("quoteTime")
+                        resolved_dte = contract.get("daysToExpiration") or dte_hint
+                        if resolved_dte in (None, ""):
+                            resolved_dte = _compute_dte(
+                                contract.get("expirationDate") or exp_date,
+                                quote_time,
+                            )
+
+                        mark = contract.get("markPrice", contract.get("mark"))
+                        if mark in (None, "") and contract.get("bidPrice") is not None and contract.get("askPrice") is not None:
+                            mark = (contract["bidPrice"] + contract["askPrice"]) / 2
+
+                        trade_price = contract.get("lastPrice", contract.get("last"))
+                        if trade_price in (None, ""):
+                            trade_price = contract.get("closePrice")
+
+                        raw_iv = contract.get("volatility")
+                        iv_decimal = None
+                        iv_percent = None
+                        if raw_iv not in (None, ""):
+                            iv_percent = float(raw_iv)
+                            iv_decimal = iv_percent / 100.0
+                        elif contract.get("iv") not in (None, ""):
+                            iv_decimal = float(contract.get("iv"))
+                            iv_percent = iv_decimal * 100.0
+
+                        rows.append(
+                            {
+                                "symbol": (
+                                    underlying_symbol
+                                    or (raw.get("underlying", {}) or {}).get("symbol", "")
+                                ).upper(),
+                                "contract_symbol": contract.get("symbol"),
+                                "expiration": exp_date,
+                                "dte": resolved_dte,
+                                "option_type": option_type,
+                                "strike": float(
+                                    contract.get("strikePrice")
+                                    or strike_hint
+                                    or 0.0
+                                ),
+                                "bid": contract.get("bidPrice", contract.get("bid", 0.0)),
+                                "ask": contract.get("askPrice", contract.get("ask", 0.0)),
+                                "mark": mark,
+                                "trade_price": trade_price,
+                                "last": trade_price,
+                                "iv": iv_decimal,
+                                "iv_percent": iv_percent,
+                                "delta": contract.get("delta", 0.0),
+                                "gamma": contract.get("gamma", 0.0),
+                                "theta": contract.get("theta", 0.0),
+                                "vega": contract.get("vega", 0.0),
+                                "rho": contract.get("rho", 0.0),
+                                "volume": contract.get("totalVolume", 0),
+                                "open_interest": contract.get("openInterest", 0),
+                                "multiplier": contract.get("multiplier", raw.get("multiplier", 100)),
+                                "underlying_price": raw.get("underlyingPrice")
+                                or contract.get("underlyingPrice")
+                                or (raw.get("underlying", {}) or {}).get("mark"),
+                                "quote_time": quote_time,
+                                "pl_open": contract.get("netChange"),
+                                "pl_pct": contract.get("markPercentChange")
+                                or contract.get("percentChange"),
+                            }
                         )
 
-                    mark = contract.get("markPrice", contract.get("mark"))
-                    if mark in (None, "") and contract.get("bidPrice") is not None and contract.get("askPrice") is not None:
-                        mark = (contract["bidPrice"] + contract["askPrice"]) / 2
-
-                    trade_price = contract.get("lastPrice", contract.get("last"))
-                    if trade_price in (None, ""):
-                        trade_price = contract.get("closePrice")
-
-                    raw_iv = contract.get("volatility")
-                    iv_decimal = None
-                    iv_percent = None
-                    if raw_iv not in (None, ""):
-                        iv_percent = float(raw_iv)
-                        iv_decimal = iv_percent / 100.0
-                    elif contract.get("iv") not in (None, ""):
-                        iv_decimal = float(contract.get("iv"))
-                        iv_percent = iv_decimal * 100.0
-
-                    rows.append(
-                        {
-                    "symbol": (underlying_symbol or (raw.get("underlying", {}) or {}).get("symbol", "")).upper(),
-                            "contract_symbol": contract.get("symbol"),
-                            "expiration": exp_date,
-                            "dte": resolved_dte,
-                            "option_type": option_type,
-                            "strike": float(contract.get("strikePrice", strike)),
-                            "bid": contract.get("bidPrice", contract.get("bid", 0.0)),
-                            "ask": contract.get("askPrice", contract.get("ask", 0.0)),
-                            "mark": mark,
-                            "trade_price": trade_price,
-                            "last": trade_price,
-                            "iv": iv_decimal,
-                            "iv_percent": iv_percent,
-                            "delta": contract.get("delta", 0.0),
-                            "gamma": contract.get("gamma", 0.0),
-                            "theta": contract.get("theta", 0.0),
-                            "vega": contract.get("vega", 0.0),
-                            "rho": contract.get("rho", 0.0),
-                            "volume": contract.get("totalVolume", 0),
-                            "open_interest": contract.get("openInterest", 0),
-                            "multiplier": contract.get("multiplier", raw.get("multiplier", 100)),
-                            "underlying_price": raw.get("underlyingPrice")
-                            or contract.get("underlyingPrice")
-                            or (raw.get("underlying", {}) or {}).get("mark"),
-                            "quote_time": quote_time,
-                            "pl_open": contract.get("netChange"),
-                            "pl_pct": contract.get("markPercentChange")
-                            or contract.get("percentChange"),
-                        }
-                    )
+        process_leg("callExpDateMap", "call")
+        process_leg("putExpDateMap", "put")
 
         df = pd.DataFrame(rows)
         if "underlyingPrice" in raw:

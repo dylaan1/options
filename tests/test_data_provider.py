@@ -1,7 +1,76 @@
+import json
 import math
 import sys
 import types
 from pathlib import Path
+
+import pytest
+
+try:  # pragma: no cover - exercised when requests is available
+    import requests  # type: ignore
+except Exception:  # pragma: no cover - fallback for minimal test envs
+    requests_stub = types.ModuleType("requests")
+
+    class HTTPError(Exception):
+        def __init__(self, message="", response=None):
+            super().__init__(message)
+            self.response = response
+
+    class Response:
+        def __init__(self):
+            self.status_code = 200
+            self.headers = {}
+            self._content = b""
+            self.encoding = "utf-8"
+
+        def json(self):
+            if not self._content:
+                return None
+            return json.loads(self.text)
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise HTTPError(f"HTTP {self.status_code}", response=self)
+
+        @property
+        def text(self):
+            return self._content.decode(self.encoding or "utf-8")
+
+    class Session:
+        def request(self, *args, **kwargs):  # pragma: no cover - parity stub
+            raise NotImplementedError
+
+        def post(self, *args, **kwargs):  # pragma: no cover - parity stub
+            raise NotImplementedError
+
+    requests_stub.HTTPError = HTTPError
+    requests_stub.Response = Response
+    requests_stub.Session = Session
+
+    sys.modules.setdefault("requests", requests_stub)
+    import requests  # type: ignore  # noqa: E402 - import after stubbing
+
+try:  # pragma: no cover - exercised when cryptography is available
+    from cryptography.fernet import Fernet  # type: ignore
+except Exception:  # pragma: no cover - fallback for minimal test envs
+    crypto_stub = types.ModuleType("cryptography")
+    fernet_stub = types.ModuleType("cryptography.fernet")
+
+    class _Fernet:  # noqa: D401 - parity stub
+        def __init__(self, key):  # pragma: no cover - trivial
+            self._key = key
+
+        def encrypt(self, data):
+            return data
+
+        def decrypt(self, token):
+            return token
+
+    fernet_stub.Fernet = _Fernet
+    crypto_stub.fernet = fernet_stub
+    sys.modules.setdefault("cryptography", crypto_stub)
+    sys.modules.setdefault("cryptography.fernet", fernet_stub)
+    from cryptography.fernet import Fernet  # type: ignore  # noqa: E402 - import after stubbing
 
 # Provide lightweight numpy/pandas stand-ins when the real dependencies are
 # unavailable (e.g., minimal CI sandboxes). When the packages exist we use them
@@ -324,6 +393,7 @@ except Exception:  # pragma: no cover - fallback for constrained environments
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from gld_mc.data_provider import SchwabDataProvider
+from gld_mc.schwab import SchwabAPIConfig, SchwabAuthManager, TokenBundle, SchwabRESTClient
 
 
 class _DummySchwabClient:
@@ -336,6 +406,35 @@ class _DummySchwabClient:
 
     def get_option_chain(self, symbol, **params):  # noqa: ARG002 - parity
         return self._chain
+
+
+class _MemoryTokenStore:
+    def __init__(self, path, passphrase):  # noqa: D401 - simple stub
+        self._bundle = None
+
+    def load(self):
+        return self._bundle
+
+    def save(self, bundle):
+        self._bundle = bundle
+
+    def clear(self):  # pragma: no cover - parity with real store
+        self._bundle = None
+
+
+def _make_response(status_code, *, method="GET", json_payload=None, text=""):
+    response = requests.Response()
+    response.status_code = status_code
+    response.encoding = "utf-8"
+    if json_payload is not None:
+        response._content = json.dumps(json_payload).encode("utf-8")
+        response.headers["Content-Type"] = "application/json"
+    else:
+        response._content = text.encode("utf-8")
+        if text:
+            response.headers["Content-Type"] = "text/plain"
+    response.url = "https://example.test/resource"
+    return response
 
 
 def test_parse_option_chain_preserves_call_and_put_rows():
@@ -474,3 +573,113 @@ def test_get_spot_prefers_nested_quote_fields():
 
     spot = provider.get_spot("ABC")
     assert math.isclose(spot, 101.25)
+
+
+def test_schwab_rest_client_retries_once_on_unauthorized():
+    config = SchwabAPIConfig()
+    auth_calls = {"refresh": 0}
+
+    class _AuthManager:
+        def get_access_token(self):
+            return "initial-token"
+
+        def refresh_access_token(self):
+            auth_calls["refresh"] += 1
+            return TokenBundle(access_token="new-token", refresh_token="r", expires_at=0)
+
+    responses = [
+        _make_response(401, json_payload={"error": "expired"}),
+        _make_response(200, json_payload={"data": "ok"}),
+    ]
+
+    class _Session:
+        def __init__(self, queue):
+            self._queue = list(queue)
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            response = self._queue.pop(0)
+            return response
+
+    session = _Session(responses)
+    client = SchwabRESTClient(config, session=session, auth_manager=_AuthManager())
+
+    payload = client._api_request("GET", "https://example.test/resource")
+
+    assert payload == {"data": "ok"}
+    assert auth_calls["refresh"] == 1
+    assert len(session.calls) == 2
+
+
+def test_schwab_rest_client_raises_runtime_error_for_server_error():
+    config = SchwabAPIConfig()
+
+    class _AuthManager:
+        def get_access_token(self):
+            return "token"
+
+        def refresh_access_token(self):  # pragma: no cover - should not run
+            raise AssertionError("refresh should not be attempted for 5xx responses")
+
+    session = types.SimpleNamespace(
+        request=lambda method, url, **kwargs: _make_response(
+            503, method=method, text="maintenance window"
+        )
+    )
+
+    client = SchwabRESTClient(config, session=session, auth_manager=_AuthManager())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        client._api_request("GET", "https://example.test/resource")
+
+    message = str(excinfo.value)
+    assert "Schwab API request failed (503)" in message
+    assert "maintenance window" in message
+
+
+def test_schwab_auth_manager_exchange_raises_on_missing_tokens(monkeypatch):
+    monkeypatch.setenv("SCHWAB_TOKEN_PASSPHRASE", "passphrase")
+    monkeypatch.setattr("gld_mc.schwab.EncryptedTokenStore", _MemoryTokenStore)
+
+    config = SchwabAPIConfig()
+    config.oauth.client_id = "id"
+    config.oauth.client_secret = "secret"
+    config.oauth.redirect_uri = "https://example.test/callback"
+
+    session = types.SimpleNamespace(
+        post=lambda url, **kwargs: _make_response(
+            200, method="POST", json_payload={"access_token": "abc"}
+        )
+    )
+
+    manager = SchwabAuthManager(config, session=session)
+
+    with pytest.raises(ValueError) as excinfo:
+        manager.exchange_authorization_code("dummy-code")
+
+    assert str(excinfo.value) == "Token response missing access or refresh token"
+
+
+def test_schwab_auth_manager_refresh_raises_on_missing_tokens(monkeypatch):
+    monkeypatch.setenv("SCHWAB_TOKEN_PASSPHRASE", "passphrase")
+    monkeypatch.setattr("gld_mc.schwab.EncryptedTokenStore", _MemoryTokenStore)
+
+    config = SchwabAPIConfig()
+    config.oauth.client_id = "id"
+    config.oauth.client_secret = "secret"
+    config.oauth.redirect_uri = "https://example.test/callback"
+
+    session = types.SimpleNamespace(
+        post=lambda url, **kwargs: _make_response(
+            200, method="POST", json_payload={"refresh_token": "def"}
+        )
+    )
+
+    manager = SchwabAuthManager(config, session=session)
+    manager._tokens = TokenBundle(access_token="tok", refresh_token="ref", expires_at=0)
+
+    with pytest.raises(ValueError) as excinfo:
+        manager.refresh_access_token()
+
+    assert str(excinfo.value) == "Token response missing access or refresh token"

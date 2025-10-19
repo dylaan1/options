@@ -18,7 +18,13 @@ def plot_results(details: pd.DataFrame, out_dir: str, tag: str) -> None:
 
     if details["hit_target"].any():
         plt.figure()
-        plt.hist(details.loc[details["hit_target"], "hit_day"], bins=range(1, 60))
+        hit_days = details.loc[details["hit_target"], "hit_day"].dropna()
+        if len(hit_days) > 0:
+            max_day = int(hit_days.max())
+            bin_edges = range(1, max_day + 2)
+        else:
+            bin_edges = range(1, 2)
+        plt.hist(hit_days, bins=bin_edges)
         plt.title(f"Exit Day Distribution (Hit Target) — {tag}")
         plt.xlabel("Trading day of exit")
         plt.ylabel("Count")

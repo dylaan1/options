@@ -94,3 +94,11 @@ On the reference development container a 45 DTE, 10k-trial configuration complet
 (≈0.203 ms per trial) using the optimized loop structure. Treat per-trial latencies above **0.25 ms** as
 a regression warning and re-run the benchmark script to confirm.
 
+## Testing
+
+The optional scientific stack tests are decorated with the `mathstack` marker. They exercise the full
+NumPy/Pandas/Black–Scholes pipeline and are skipped automatically if those dependencies are unavailable.
+
+- Run only these tests with `pytest -m mathstack` after installing the scientific stack.
+- Skip them explicitly (even when the dependencies are present) with `pytest -m "not mathstack"`.
+

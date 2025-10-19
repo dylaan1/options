@@ -79,6 +79,9 @@ class SimConfig:
     # Simulation
     num_trials: int              = 20_000
     seed: int                    = 7
+    profile: bool                = False
+    profile_output: str | None   = None
+    vectorized_paths: bool       = True
 
     # Trade management
     entry_price: float           = 5.50

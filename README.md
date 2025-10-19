@@ -79,3 +79,26 @@ market-data layer with live Schwab integration and a Tkinter desktop UI.
 - **How often can I poll?** — The default rate limiter caps requests at 120 per minute to match Schwab’s
   published guidance. Adjust `SchwabRateLimit.max_requests_per_minute` if your entitlement differs.
 
+## Performance benchmarking & regression guidance
+
+Monte Carlo workloads can become CPU-bound, so the simulator now exposes lightweight profiling hooks and a
+repeatable benchmark driver:
+
+- Set `SimConfig.profile = True` to capture wall-clock timing and a `cProfile` summary for each run. The
+  `profile_output` field optionally dumps the raw profiler table to disk.
+- Run `python benchmarks/benchmark_sim.py` to sample representative scenarios (short/long DTE and varied
+  `num_trials`). Use `--disable-vectorized` to compare against the scalar Gaussian draw loop and
+  `--show-profile` to print the hottest functions.
+
+On the reference development container a 45 DTE, 10k-trial configuration completes in roughly **2.03 seconds**
+(≈0.203 ms per trial) using the optimized loop structure. Treat per-trial latencies above **0.25 ms** as
+a regression warning and re-run the benchmark script to confirm.
+
+## Testing
+
+The optional scientific stack tests are decorated with the `mathstack` marker. They exercise the full
+NumPy/Pandas/Black–Scholes pipeline and are skipped automatically if those dependencies are unavailable.
+
+- Run only these tests with `pytest -m mathstack` after installing the scientific stack.
+- Skip them explicitly (even when the dependencies are present) with `pytest -m "not mathstack"`.
+

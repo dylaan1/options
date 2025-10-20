@@ -17,6 +17,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from .analytics import exit_day_bin_edges
 from .config import DataProviderConfig, SimConfig
 from .data_provider import QuoteStreamHandle, create_data_provider
+from .plotting import compute_hit_day_bin_edges, extract_hit_days
 from .sim import simulate
 
 PAD = 10

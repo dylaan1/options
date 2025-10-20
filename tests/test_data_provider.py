@@ -3,102 +3,339 @@ import sys
 import types
 from pathlib import Path
 
-# Provide lightweight numpy/pandas stand-ins so the parser can be imported in
-# environments where the heavy dependencies are unavailable (e.g., CI sandboxes).
+# Provide lightweight numpy/pandas stand-ins when the real dependencies are
+# unavailable (e.g., minimal CI sandboxes). When the packages exist we use them
+# directly so tests exercising numpy/pandas behaviour can run.
 
+try:  # pragma: no cover - exercised when numpy/pandas are available
+    import numpy  # noqa: F401
+    import pandas  # noqa: F401
+except Exception:  # pragma: no cover - fallback for constrained environments
 
-class _DummyRNG:
-    def normal(self, loc=0.0, scale=1.0, size=None):
-        if size is None:
-            return loc
-        return [loc for _ in range(size)]
+    class _DummyRNG:
+        def normal(self, loc=0.0, scale=1.0, size=None):
+            if size is None:
+                return loc
+            return [loc for _ in range(size)]
 
+    def _default_rng(seed=None):  # noqa: D401 - simple stub
+        return _DummyRNG()
 
-def _default_rng(seed=None):  # noqa: D401 - simple stub
-    return _DummyRNG()
+    class _ErrState:
+        def __enter__(self):
+            return self
 
+        def __exit__(self, exc_type, exc, tb):  # noqa: D401
+            return False
 
-numpy_stub = types.ModuleType("numpy")
-numpy_stub.random = types.SimpleNamespace(default_rng=_default_rng)
+    class _Array:
+        def __init__(self, data):
+            self._data = data
 
+        def __iter__(self):
+            return iter(self._data)
 
-def _linspace(start, stop, num=50):
-    if num <= 1:
-        return [float(start)]
-    step = (stop - start) / (num - 1)
-    return [float(start + step * i) for i in range(num)]
+        def __len__(self):
+            return len(self._data)
 
+        def __getitem__(self, key):
+            if isinstance(key, tuple):
+                first, second = key
+                if isinstance(first, slice):
+                    indices = range(*first.indices(len(self._data)))
+                    rows = [_ensure_array(self._data[idx]) for idx in indices]
+                    return _stack_rows(rows, second)
+                row = self._data[first]
+                if isinstance(second, slice):
+                    return _Array(row[second])
+                if isinstance(second, _Array):
+                    return _Array([val for val, mask in zip(row, second._data) if mask])
+                return row[second]
+            if isinstance(key, slice):
+                return _Array(self._data[key])
+            if isinstance(key, _Array):
+                return _Array([val for val, mask in zip(self._data, key._data) if mask])
+            return self._data[key]
 
-numpy_stub.linspace = _linspace
-sys.modules.setdefault("numpy", numpy_stub)
+        def __setitem__(self, key, value):
+            if isinstance(key, tuple):
+                first, second = key
+                if isinstance(first, slice):
+                    indices = range(*first.indices(len(self._data)))
+                    for idx in indices:
+                        self[idx, second] = value
+                    return
+                row = self._data[first]
+                if isinstance(second, slice):
+                    indices = range(*second.indices(len(row)))
+                    for idx in indices:
+                        row[idx] = value
+                    return
+                row[second] = value
+                return
+            if isinstance(key, slice):
+                indices = range(*key.indices(len(self._data)))
+                for idx in indices:
+                    self._data[idx] = value
+                return
+            self._data[key] = value
 
+        def _binary_op(self, other, op):
+            if isinstance(other, _Array):
+                return _Array([op(a, b) for a, b in zip(self._data, other._data)])
+            return _Array([op(a, other) for a in self._data])
 
-class _Series:
-    def __init__(self, data):
-        self._data = list(data)
+        def __add__(self, other):
+            return self._binary_op(other, lambda a, b: a + b)
 
-    def __iter__(self):
-        return iter(self._data)
+        def __sub__(self, other):
+            return self._binary_op(other, lambda a, b: a - b)
 
-    def __len__(self):
-        return len(self._data)
+        def __mul__(self, other):
+            return self._binary_op(other, lambda a, b: a * b)
 
-    def __getitem__(self, idx):
-        return self._data[idx]
+        def __truediv__(self, other):
+            return self._binary_op(other, lambda a, b: a / b if b else float("nan"))
 
-    def __eq__(self, other):
-        return _Series(value == other for value in self._data)
+        def __gt__(self, other):
+            return self._binary_op(other, lambda a, b: a > b)
 
-    def to_list(self):
-        return list(self._data)
+        def __ge__(self, other):
+            return self._binary_op(other, lambda a, b: a >= b)
 
+        def __lt__(self, other):
+            return self._binary_op(other, lambda a, b: a < b)
 
-class _DataFrame:
-    def __init__(self, rows):
-        self._rows = [dict(row) for row in rows]
-        self.attrs = {}
-        self.iloc = _ILoc(self)
+        def __le__(self, other):
+            return self._binary_op(other, lambda a, b: a <= b)
 
-    def sort_values(self, key):
-        return _DataFrame(sorted(self._rows, key=lambda row: row.get(key)))
+        def mean(self):
+            if not self._data:
+                return 0.0
+            return sum(self._data) / len(self._data)
 
-    def reset_index(self, drop=False):
-        _ = drop  # parity with pandas signature
-        return _DataFrame(self._rows)
+        def to_list(self):
+            return list(self._data)
 
-    def __len__(self):
-        return len(self._rows)
+    def _ensure_array(data):
+        return data if isinstance(data, _Array) else _Array(data)
 
-    def __getitem__(self, key):
-        if isinstance(key, str):
-            return _Series(row.get(key) for row in self._rows)
-        if isinstance(key, _Series):
-            mask = [bool(value) for value in key]
-            return _DataFrame(
-                [row for row, include in zip(self._rows, mask) if include]
-            )
-        if isinstance(key, (list, tuple)):
-            return _DataFrame(
-                [row for row, include in zip(self._rows, key) if include]
-            )
-        raise TypeError(f"Unsupported key type: {type(key)!r}")
+    def _value_for_dtype(value, dtype):
+        if dtype is bool:
+            return bool(value)
+        if dtype is int:
+            return int(value)
+        if dtype is object:
+            return value
+        try:
+            return float(value)
+        except Exception:  # noqa: BLE001
+            return value
 
+    def _create_array(shape, fill_value=0.0, dtype=float):
+        if isinstance(shape, tuple):
+            outer = []
+            for _ in range(shape[0]):
+                outer.append([
+                    _value_for_dtype(fill_value, dtype)
+                    for _ in range(shape[1])
+                ])
+            return _Array(outer)
+        return _Array([
+            _value_for_dtype(fill_value, dtype)
+            for _ in range(shape)
+        ])
 
-class _ILoc:
-    def __init__(self, df: "_DataFrame") -> None:
-        self._df = df
+    def _array(values, dtype=float):
+        if isinstance(values, _Array):
+            data = values._data
+        else:
+            data = list(values)
+        return _Array([_value_for_dtype(v, dtype) for v in data])
 
-    def __getitem__(self, index):
-        return self._df._rows[index]
+    def _stack_rows(rows, selector):
+        if isinstance(selector, slice):
+            return _Array([row._data[selector] for row in rows])
+        if isinstance(selector, _Array):
+            return _Array([
+                row._data[idx]
+                for row in rows
+                for idx, mask in enumerate(selector._data)
+                if mask
+            ])
+        return _Array([row._data[selector] for row in rows])
 
+    def _linspace(start, stop, num=50):
+        if num <= 1:
+            return [float(start)]
+        step = (stop - start) / (num - 1)
+        return [float(start + step * i) for i in range(num)]
 
-pandas_stub = types.ModuleType("pandas")
-pandas_stub.DataFrame = _DataFrame
-sys.modules.setdefault("pandas", pandas_stub)
+    def _percentile(array, qs):
+        data = sorted(_ensure_array(array)._data)
+        results = []
+        for q in qs:
+            if not data:
+                results.append(float("nan"))
+                continue
+            rank = (q / 100.0) * (len(data) - 1)
+            lower = int(rank)
+            upper = min(lower + 1, len(data) - 1)
+            weight = rank - lower
+            results.append(data[lower] * (1 - weight) + data[upper] * weight)
+        return results
+
+    def _median(array):
+        return _percentile(array, [50])[0]
+
+    def _mean(array):
+        arr = _ensure_array(array)
+        if not arr._data:
+            return 0.0
+        return sum(arr._data) / len(arr._data)
+
+    def _maximum(a, b):
+        arr_a = _ensure_array(a)
+        if isinstance(b, _Array):
+            return _Array([max(x, y) for x, y in zip(arr_a._data, b._data)])
+        return _Array([max(x, b) for x in arr_a._data])
+
+    def _where(condition, x, y):
+        if isinstance(condition, bool):
+            return x if condition else y
+        cond = _ensure_array(condition)
+        if isinstance(x, _Array):
+            x_vals = x._data
+        else:
+            x_vals = [x for _ in cond._data]
+        if isinstance(y, _Array):
+            y_vals = y._data
+        else:
+            y_vals = [y for _ in cond._data]
+        result = [
+            xv if mask else yv
+            for mask, xv, yv in zip(cond._data, x_vals, y_vals)
+        ]
+        return _Array(result)
+
+    def _any(array):
+        return any(_ensure_array(array)._data)
+
+    numpy_stub = types.ModuleType("numpy")
+    numpy_stub.random = types.SimpleNamespace(default_rng=_default_rng)
+    numpy_stub.linspace = _linspace
+    numpy_stub.full = lambda shape, fill_value, dtype=float: _create_array(shape, fill_value, dtype)
+    numpy_stub.zeros = lambda shape, dtype=float: _create_array(shape, 0.0, dtype)
+    numpy_stub.array = lambda values, dtype=float: _array(values, dtype)
+    numpy_stub.percentile = _percentile
+    numpy_stub.median = _median
+    numpy_stub.mean = _mean
+    numpy_stub.maximum = _maximum
+    numpy_stub.where = _where
+    numpy_stub.any = _any
+    numpy_stub.errstate = lambda **kwargs: _ErrState()
+    numpy_stub.nan = float("nan")
+    numpy_stub.isscalar = lambda obj: not isinstance(obj, (list, tuple, _Array, dict))
+    numpy_stub.bool_ = bool
+    sys.modules.setdefault("numpy", numpy_stub)
+
+    class _Series:
+        def __init__(self, data):
+            self._data = list(data)
+
+        def __iter__(self):
+            return iter(self._data)
+
+        def __len__(self):
+            return len(self._data)
+
+        def __getitem__(self, idx):
+            return self._data[idx]
+
+        def __eq__(self, other):
+            return _Series(value == other for value in self._data)
+
+        def to_list(self):
+            return list(self._data)
+
+    class _DataFrame:
+        def __init__(self, rows):
+            if isinstance(rows, dict):
+                keys = list(rows.keys())
+                first_value = next(iter(rows.values()), [])
+                if isinstance(first_value, _Array):
+                    length = len(first_value)
+                elif isinstance(first_value, (list, tuple)):
+                    length = len(first_value)
+                else:
+                    length = 1
+                self._rows = []
+                for idx in range(length):
+                    row_dict = {}
+                    for key in keys:
+                        value = rows[key]
+                        if isinstance(value, _Array):
+                            row_dict[key] = value._data[idx] if idx < len(value) else None
+                        elif isinstance(value, (list, tuple)):
+                            row_dict[key] = value[idx]
+                        else:
+                            row_dict[key] = value
+                    self._rows.append(row_dict)
+            else:
+                self._rows = [dict(row) for row in rows]
+            self.attrs = {}
+            self.iloc = _ILoc(self)
+
+        def sort_values(self, key):
+            return _DataFrame(sorted(self._rows, key=lambda row: row.get(key)))
+
+        def reset_index(self, drop=False):
+            _ = drop  # parity with pandas signature
+            return _DataFrame(self._rows)
+
+        def __len__(self):
+            return len(self._rows)
+
+        def __getitem__(self, key):
+            if isinstance(key, str):
+                return _Series(row.get(key) for row in self._rows)
+            if isinstance(key, _Series):
+                mask = [bool(value) for value in key]
+                return _DataFrame(
+                    [row for row, include in zip(self._rows, mask) if include]
+                )
+            if isinstance(key, (list, tuple)):
+                return _DataFrame(
+                    [row for row, include in zip(self._rows, key) if include]
+                )
+            raise TypeError(f"Unsupported key type: {type(key)!r}")
+
+    class _ILoc:
+        def __init__(self, df: "_DataFrame") -> None:
+            self._df = df
+
+        def __getitem__(self, index):
+            return self._df._rows[index]
+
+    pandas_stub = types.ModuleType("pandas")
+    pandas_stub.DataFrame = _DataFrame
+    sys.modules.setdefault("pandas", pandas_stub)
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from gld_mc.data_provider import SchwabDataProvider
+
+
+class _DummySchwabClient:
+    def __init__(self, quote=None, chain=None):
+        self._quote = quote or {}
+        self._chain = chain or {}
+
+    def get_quote(self, symbol):  # noqa: ARG002 - signature parity
+        return self._quote
+
+    def get_option_chain(self, symbol, **params):  # noqa: ARG002 - parity
+        return self._chain
 
 
 def test_parse_option_chain_preserves_call_and_put_rows():
@@ -180,3 +417,60 @@ def test_parse_option_chain_preserves_call_and_put_rows():
 
     # confirm the underlying price metadata propagates
     assert df.attrs["underlying_price"] == 102.0
+
+
+def test_parse_option_chain_handles_optional_fields():
+    raw = {
+        "symbol": "ABC",
+        "multiplier": 75,
+        "underlying": {"symbol": "ABC", "mark": 123.45},
+        "callExpDateMap": {
+            "2024-05-17:45": {
+                "120.0": [
+                    {
+                        "symbol": "ABC_20240517C00120000",
+                        "strikePrice": 120.0,
+                        "bidPrice": 5.0,
+                        "askPrice": 6.0,
+                        "closePrice": 5.5,
+                        "totalVolume": 50,
+                        "openInterest": 150,
+                        "delta": 0.5,
+                        "gamma": 0.01,
+                        "theta": -0.02,
+                        "vega": 0.12,
+                        "rho": 0.05,
+                        "quoteTimeInLong": 1_700_000_000_000,
+                        "daysToExpiration": None,
+                        "iv": 0.25,
+                        "markPercentChange": 1.23,
+                    }
+                ]
+            }
+        },
+        "putExpDateMap": {},
+    }
+
+    df = SchwabDataProvider._parse_option_chain(raw)
+    assert len(df) == 1
+
+    row = df.iloc[0]
+    assert row["option_type"] == "call"
+    assert math.isclose(row["mark"], 5.5)
+    assert math.isclose(row["trade_price"], 5.5)
+    assert math.isclose(row["iv"], 0.25)
+    assert math.isclose(row["iv_percent"], 25.0)
+    assert row["dte"] == 45
+    assert row["multiplier"] == 75
+    assert df.attrs["underlying_price"] == 123.45
+
+
+def test_get_spot_prefers_nested_quote_fields():
+    quote_payload = {
+        "quote": {"lastPrice": 101.25},
+        "candles": [{"close": 99.5}],
+    }
+    provider = SchwabDataProvider(client=_DummySchwabClient(quote=quote_payload))
+
+    spot = provider.get_spot("ABC")
+    assert math.isclose(spot, 101.25)

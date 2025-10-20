@@ -3,6 +3,8 @@ import os
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from .analytics import exit_day_bin_edges
+
 def plot_results(details: pd.DataFrame, out_dir: str, tag: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
 
@@ -18,7 +20,9 @@ def plot_results(details: pd.DataFrame, out_dir: str, tag: str) -> None:
 
     if details["hit_target"].any():
         plt.figure()
-        plt.hist(details.loc[details["hit_target"], "hit_day"], bins=range(1, 60))
+        hit_days = details.loc[details["hit_target"], "hit_day"]
+        bin_edges = exit_day_bin_edges(hit_days)
+        plt.hist(pd.to_numeric(hit_days, errors="coerce").dropna(), bins=bin_edges)
         plt.title(f"Exit Day Distribution (Hit Target) — {tag}")
         plt.xlabel("Trading day of exit")
         plt.ylabel("Count")

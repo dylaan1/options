@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+from .analytics import exit_day_bin_edges
 from .config import DataProviderConfig, SimConfig
 from .data_provider import QuoteStreamHandle, create_data_provider
 from .sim import simulate
@@ -1631,43 +1632,63 @@ class SimUI(tk.Tk):
         charts_top = ttk.Frame(container)
         charts_top.pack(fill="both", expand=True)
 
-        fig1 = plt.Figure(figsize=(6.0, 4.6), dpi=100)
-        ax1 = fig1.add_subplot(111)
-        ax1.hist(pd.to_numeric(details["final_pl"], errors="coerce").dropna(), bins=80, color="#5a9bd4", alpha=0.85)
-        ax1.set_title("Final P&L Distribution")
-        ax1.set_xlabel("P&L per contract ($)")
-        ax1.set_ylabel("Frequency")
-        ax1.grid(True, alpha=0.3)
-        canvas1 = FigureCanvasTkAgg(fig1, master=charts_top)
-        canvas1.draw()
-        canvas1.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(0, PAD))
+        pnl_fig = plt.Figure(figsize=(6.0, 4.6), dpi=100)
+        pnl_ax = pnl_fig.add_subplot(111)
+        pnl_ax.hist(pd.to_numeric(details["final_pl"], errors="coerce").dropna(), bins=80, color="#5a9bd4", alpha=0.85)
+        pnl_ax.set_title("Final P&L Distribution")
+        pnl_ax.set_xlabel("P&L per contract ($)")
+        pnl_ax.set_ylabel("Frequency")
+        pnl_ax.grid(True, alpha=0.3)
+        pnl_canvas = FigureCanvasTkAgg(pnl_fig, master=charts_top)
+        pnl_canvas.draw()
+        pnl_canvas.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(0, PAD))
 
-        fig2 = plt.Figure(figsize=(6.0, 4.6), dpi=100)
-        ax2 = fig2.add_subplot(111)
+        hit_series = pd.Series(dtype=float)
+        if "hit_day" in details.columns:
+            hit_series = pd.to_numeric(details["hit_day"], errors="coerce")
+            if "hit_target" in details.columns:
+                hit_series = hit_series[details["hit_target"].astype(bool)]
+            hit_series = hit_series.dropna()
+
+        exit_fig = plt.Figure(figsize=(6.0, 4.6), dpi=100)
+        exit_ax = exit_fig.add_subplot(111)
+        if not hit_series.empty:
+            bins = exit_day_bin_edges(hit_series)
+            exit_ax.hist(hit_series, bins=bins, color="#f4a259", alpha=0.85)
+        exit_ax.set_title("Trading Days to Target Hit")
+        exit_ax.set_xlabel("Trading day of exit")
+        exit_ax.set_ylabel("Count")
+        exit_ax.grid(True, alpha=0.3)
+        exit_canvas = FigureCanvasTkAgg(exit_fig, master=charts_top)
+        exit_canvas.draw()
+        exit_canvas.get_tk_widget().pack(side="left", fill="both", expand=True)
+
+        calendar_fig = plt.Figure(figsize=(6.0, 4.6), dpi=100)
+        calendar_ax = calendar_fig.add_subplot(111)
         calendar_series = pd.to_numeric(details.get("calendar_days"), errors="coerce").dropna()
         if not calendar_series.empty:
-            bins = max(int(calendar_series.max()) + 1, 10)
-            ax2.hist(calendar_series, bins=bins, color="#f4a259", alpha=0.85)
-        ax2.set_title("Calendar Days to Exit Distribution")
-        ax2.set_xlabel("Calendar days in position")
-        ax2.set_ylabel("Frequency")
-        ax2.grid(True, alpha=0.3)
-        canvas2 = FigureCanvasTkAgg(fig2, master=charts_top)
-        canvas2.draw()
-        canvas2.get_tk_widget().pack(side="left", fill="both", expand=True)
+            calendar_bins = max(int(calendar_series.max()) + 1, 10)
+            calendar_ax.hist(calendar_series, bins=calendar_bins, color="#f1c453", alpha=0.85)
+        calendar_ax.set_title("Calendar Days to Exit Distribution")
+        calendar_ax.set_xlabel("Calendar days in position")
+        calendar_ax.set_ylabel("Frequency")
+        calendar_ax.grid(True, alpha=0.3)
+        calendar_canvas = FigureCanvasTkAgg(calendar_fig, master=charts_top)
+        calendar_canvas.draw()
+        calendar_canvas.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(PAD, 0))
 
         charts_bottom = ttk.Frame(container)
         charts_bottom.pack(fill="both", expand=True, pady=(PAD, 0))
 
-        fig3 = plt.Figure(figsize=(12.0, 4.8), dpi=100)
-        ax3 = fig3.add_subplot(111)
+        paths_fig = plt.Figure(figsize=(12.0, 4.8), dpi=100)
+        paths_ax = paths_fig.add_subplot(111)
         paths = self._extract_paths_array(details)
-        self._plot_pl_paths(ax3, paths)
+        self._plot_pl_paths(paths_ax, paths)
         if paths.size > 0:
-            ax3.set_title("P&L Progression Across Trials")
-        canvas3 = FigureCanvasTkAgg(fig3, master=charts_bottom)
-        canvas3.draw()
-        canvas3.get_tk_widget().pack(fill="both", expand=True)
+            paths_ax.set_title("P&L Progression Across Trials")
+        paths_canvas = FigureCanvasTkAgg(paths_fig, master=charts_bottom)
+        paths_canvas.draw()
+        paths_canvas.get_tk_widget().pack(fill="both", expand=True)
 
         ttk.Button(win, text="Close", command=win.destroy).pack(side="bottom", pady=PAD)
 
@@ -1727,57 +1748,104 @@ class SimUI(tk.Tk):
             "#bcbd22", "#17becf"
         ]
 
-        fig1 = plt.Figure(figsize=(6.4, 4.8), dpi=100)
-        ax1 = fig1.add_subplot(111)
+        prepared: list[dict[str, Any]] = []
         for idx, result in enumerate(results):
             details = result["details"]
             color = palette[idx % len(palette)]
             label = f"{result['strike']:.2f}{self._option_code(result['option_type'])}"
-            ax1.hist(
-                pd.to_numeric(details["final_pl"], errors="coerce").dropna(),
+            final_pl = pd.to_numeric(details["final_pl"], errors="coerce").dropna()
+            calendar_series = pd.to_numeric(details.get("calendar_days"), errors="coerce").dropna()
+            hit_series = pd.Series(dtype=float)
+            if "hit_day" in details.columns:
+                hit_series = pd.to_numeric(details["hit_day"], errors="coerce")
+                if "hit_target" in details.columns:
+                    hit_series = hit_series[details["hit_target"].astype(bool)]
+                hit_series = hit_series.dropna()
+            prepared.append(
+                {
+                    "label": label,
+                    "color": color,
+                    "final_pl": final_pl,
+                    "calendar": calendar_series,
+                    "hit_days": hit_series,
+                }
+            )
+
+        pnl_fig = plt.Figure(figsize=(6.4, 4.8), dpi=100)
+        pnl_ax = pnl_fig.add_subplot(111)
+        for item in prepared:
+            if item["final_pl"].empty:
+                continue
+            pnl_ax.hist(
+                item["final_pl"],
                 bins=70,
                 alpha=0.35,
-                label=label,
-                color=color,
+                label=item["label"],
+                color=item["color"],
             )
-        ax1.set_title("Final P&L Distribution by Contract")
-        ax1.set_xlabel("P&L per contract ($)")
-        ax1.set_ylabel("Frequency")
-        ax1.grid(True, alpha=0.3)
-        handles, labels = ax1.get_legend_handles_labels()
+        pnl_ax.set_title("Final P&L Distribution by Contract")
+        pnl_ax.set_xlabel("P&L per contract ($)")
+        pnl_ax.set_ylabel("Frequency")
+        pnl_ax.grid(True, alpha=0.3)
+        handles, labels = pnl_ax.get_legend_handles_labels()
         if handles:
-            ax1.legend(title="Strike/Type")
-        canvas1 = FigureCanvasTkAgg(fig1, master=charts_top)
-        canvas1.draw()
-        canvas1.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(0, PAD))
+            pnl_ax.legend(title="Strike/Type")
+        pnl_canvas = FigureCanvasTkAgg(pnl_fig, master=charts_top)
+        pnl_canvas.draw()
+        pnl_canvas.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(0, PAD))
 
-        fig2 = plt.Figure(figsize=(6.4, 4.8), dpi=100)
-        ax2 = fig2.add_subplot(111)
-        for idx, result in enumerate(results):
-            details = result["details"]
-            color = palette[idx % len(palette)]
-            label = f"{result['strike']:.2f}{self._option_code(result['option_type'])}"
-            calendar_series = pd.to_numeric(details.get("calendar_days"), errors="coerce").dropna()
-            if calendar_series.empty:
+        combined_hits = pd.concat(
+            [item["hit_days"] for item in prepared if not item["hit_days"].empty],
+            ignore_index=True,
+        ) if any(not item["hit_days"].empty for item in prepared) else pd.Series(dtype=float)
+        exit_bins = exit_day_bin_edges(combined_hits)
+
+        exit_fig = plt.Figure(figsize=(6.4, 4.8), dpi=100)
+        exit_ax = exit_fig.add_subplot(111)
+        for item in prepared:
+            if item["hit_days"].empty:
                 continue
-            bins = max(int(calendar_series.max()) + 1, 10)
-            ax2.hist(
-                calendar_series,
-                bins=bins,
-                alpha=0.4,
-                label=label,
-                color=color,
+            exit_ax.hist(
+                item["hit_days"],
+                bins=exit_bins,
+                alpha=0.35,
+                label=item["label"],
+                color=item["color"],
             )
-        ax2.set_title("Calendar Days to Exit by Contract")
-        ax2.set_xlabel("Calendar days in position")
-        ax2.set_ylabel("Frequency")
-        ax2.grid(True, alpha=0.3)
-        handles, labels = ax2.get_legend_handles_labels()
+        exit_ax.set_title("Trading Days to Target Hit by Contract")
+        exit_ax.set_xlabel("Trading day of exit")
+        exit_ax.set_ylabel("Count")
+        exit_ax.grid(True, alpha=0.3)
+        handles, labels = exit_ax.get_legend_handles_labels()
         if handles:
-            ax2.legend(title="Strike/Type")
-        canvas2 = FigureCanvasTkAgg(fig2, master=charts_top)
-        canvas2.draw()
-        canvas2.get_tk_widget().pack(side="left", fill="both", expand=True)
+            exit_ax.legend(title="Strike/Type")
+        exit_canvas = FigureCanvasTkAgg(exit_fig, master=charts_top)
+        exit_canvas.draw()
+        exit_canvas.get_tk_widget().pack(side="left", fill="both", expand=True)
+
+        calendar_fig = plt.Figure(figsize=(6.4, 4.8), dpi=100)
+        calendar_ax = calendar_fig.add_subplot(111)
+        for item in prepared:
+            if item["calendar"].empty:
+                continue
+            calendar_bins = max(int(item["calendar"].max()) + 1, 10)
+            calendar_ax.hist(
+                item["calendar"],
+                bins=calendar_bins,
+                alpha=0.4,
+                label=item["label"],
+                color=item["color"],
+            )
+        calendar_ax.set_title("Calendar Days to Exit by Contract")
+        calendar_ax.set_xlabel("Calendar days in position")
+        calendar_ax.set_ylabel("Frequency")
+        calendar_ax.grid(True, alpha=0.3)
+        handles, labels = calendar_ax.get_legend_handles_labels()
+        if handles:
+            calendar_ax.legend(title="Strike/Type")
+        calendar_canvas = FigureCanvasTkAgg(calendar_fig, master=charts_top)
+        calendar_canvas.draw()
+        calendar_canvas.get_tk_widget().pack(side="left", fill="both", expand=True, padx=(PAD, 0))
 
         charts_bottom = ttk.Frame(container)
         charts_bottom.pack(fill="both", expand=True, pady=(PAD, 0))

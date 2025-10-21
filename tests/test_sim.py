@@ -139,3 +139,87 @@ def test_stop_blocked_within_avoid_window(deterministic_rng, monkeypatch):
     assert row["exit_reason"].startswith("expiry")
     expected_days = max(int(round(cfg.dte_calendar * (cfg.annual_trading_days / 365.0))), 1)
     assert row["days_open"] == expected_days
+
+
+def test_summary_matches_detail_statistics():
+    cfg = SimConfig(
+        option_type="call",
+        dte_calendar=21,
+        num_trials=256,
+        seed=314,
+        iv_mode="fixed",
+        iv_fixed=0.22,
+        entry_price=4.25,
+        commission_per_side=0.10,
+        target_profit=3.0,
+        stop_option_price=0.5,
+        contract_multiplier=1,
+        strike=100.0,
+        spot=101.0,
+    )
+
+    summary, details = sim_module.simulate(cfg)
+
+    summary_map = {row["Metric"]: row["Value"] for _, row in summary.iterrows()}
+
+    hit_mask = details["hit_day"] > 0
+    if np.any(hit_mask):
+        expected_median = float(np.median(details.loc[hit_mask, "hit_day"].to_numpy(dtype=float)))
+        assert summary_map["Median day to hit target"] == pytest.approx(expected_median)
+    else:
+        assert math.isnan(summary_map["Median day to hit target"])
+
+    expected_prob = details["hit_target"].mean()
+    assert summary_map["P(hit target before expiry)"] == f"{expected_prob * 100:.1f}%"
+
+    final_pl = details["final_pl"].to_numpy(dtype=float)
+    expected_mean = f"${details['final_pl'].mean():,.0f}"
+    assert summary_map["Mean Final P&L"] == expected_mean
+
+    for label, percentile in [
+        ("P&L p5", 5),
+        ("P&L p25", 25),
+        ("P&L p50", 50),
+        ("P&L p75", 75),
+        ("P&L p95", 95),
+    ]:
+        value = float(np.percentile(final_pl, percentile))
+        assert summary_map[label] == f"${value:,.0f}"
+
+    runtime = summary.attrs.get("runtime", {})
+    expected_days = max(int(round(cfg.dte_calendar * (cfg.annual_trading_days / 365.0))), 1)
+    assert runtime.get("num_trials") == cfg.num_trials
+    assert runtime.get("trading_days") == expected_days
+
+
+@pytest.mark.parametrize(
+    ("mu_mode", "mu_custom", "expected_drift"),
+    [
+        ("risk_neutral", 0.33, 0.02),
+        ("custom", 0.42, 0.42),
+    ],
+)
+def test_summary_reports_resolved_drift(deterministic_rng, mu_mode, mu_custom, expected_drift):
+    cfg = SimConfig(
+        option_type="call",
+        dte_calendar=5,
+        num_trials=1,
+        seed=123,
+        iv_mode="fixed",
+        iv_fixed=0.2,
+        entry_price=5.0,
+        commission_per_side=0.0,
+        target_profit=10.0,
+        stop_option_price=0.01,
+        contract_multiplier=1,
+        strike=100.0,
+        spot=101.0,
+        mu_mode=mu_mode,
+        mu_custom=mu_custom,
+    )
+
+    summary, _ = sim_module.simulate(cfg)
+    summary_map = {row["Metric"]: row["Value"] for _, row in summary.iterrows()}
+
+    assert summary_map["Drift Mode"] == mu_mode
+    assert summary_map["Drift (annual)"] == pytest.approx(expected_drift)

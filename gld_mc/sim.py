@@ -95,6 +95,15 @@ def simulate(cfg: SimConfig):
     return summary, details
 
 
+def _resolve_annual_drift(cfg: SimConfig) -> float:
+    """Return the annualized drift used for price evolution."""
+    if cfg.mu_mode == "risk_neutral":
+        return cfg.risk_free_rate
+    if cfg.mu_mode == "custom":
+        return cfg.mu_custom
+    raise ValueError(f"Unsupported drift mode: {cfg.mu_mode!r}")
+
+
 def _run_simulation(cfg: SimConfig):
     option_type = cfg.option_type.lower()
     if option_type not in {"call", "put"}:
@@ -119,8 +128,21 @@ def _run_simulation(cfg: SimConfig):
     else:
         sigmas = rng.uniform(cfg.iv_min, cfg.iv_max, size=cfg.num_trials)
 
-    drift_base = cfg.risk_free_rate if cfg.mu_mode == "risk_neutral" else cfg.mu_custom
-    drift_annual = drift_base
+    drift_annual = _resolve_annual_drift(cfg)
+
+    sigma_values = [float(s) for s in sigmas] if cfg.num_trials else []
+    if cfg.num_trials:
+        sigmas = np.array(sigma_values, dtype=float)
+        mu = drift_annual
+        drift_terms = np.array(
+            [mu - 0.5 * sigma * sigma for sigma in sigma_values],
+            dtype=float,
+        ) * dt
+        vol_terms = np.array([sigma * sqrt_dt for sigma in sigma_values], dtype=float)
+    else:
+        sigmas = np.array([], dtype=float)
+        drift_terms = np.array([], dtype=float)
+        vol_terms = np.array([], dtype=float)
 
     # Time remaining after each day (first step keeps the full time-to-expiry)
     Ts = np.array([(trading_days - t) * dt for t in range(trading_days)], dtype=float)

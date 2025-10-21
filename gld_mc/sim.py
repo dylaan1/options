@@ -120,6 +120,7 @@ def _run_simulation(cfg: SimConfig):
         sigmas = rng.uniform(cfg.iv_min, cfg.iv_max, size=cfg.num_trials)
 
     drift_base = cfg.risk_free_rate if cfg.mu_mode == "risk_neutral" else cfg.mu_custom
+    drift_annual = drift_base
 
     # Time remaining after each day (first step keeps the full time-to-expiry)
     Ts = np.array([(trading_days - t) * dt for t in range(trading_days)], dtype=float)
@@ -237,7 +238,7 @@ def _run_simulation(cfg: SimConfig):
                 cfg.iv_fixed,
                 f"{cfg.iv_min}–{cfg.iv_max}",
                 cfg.mu_mode,
-                cfg.mu_custom,
+                drift_annual,
                 f"${cfg.entry_price:.2f}",
                 cfg.strike,
                 f"${cfg.target_profit:.0f}",

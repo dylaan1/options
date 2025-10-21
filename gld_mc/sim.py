@@ -59,6 +59,15 @@ def simulate(cfg: SimConfig):
     return summary, details
 
 
+def _resolve_annual_drift(cfg: SimConfig) -> float:
+    """Return the annualized drift used for price evolution."""
+    if cfg.mu_mode == "risk_neutral":
+        return cfg.risk_free_rate
+    if cfg.mu_mode == "custom":
+        return cfg.mu_custom
+    raise ValueError(f"Unsupported drift mode: {cfg.mu_mode!r}")
+
+
 def _run_simulation(cfg: SimConfig):
     option_type = cfg.option_type.lower()
     if option_type not in {"call", "put"}:
@@ -83,13 +92,14 @@ def _run_simulation(cfg: SimConfig):
     else:
         sigmas = rng.uniform(cfg.iv_min, cfg.iv_max, size=cfg.num_trials)
 
-    drift_base = cfg.risk_free_rate if cfg.mu_mode == "risk_neutral" else cfg.mu_custom
+    drift_annual = _resolve_annual_drift(cfg)
 
     sigma_values = [float(s) for s in sigmas] if cfg.num_trials else []
     if cfg.num_trials:
         sigmas = np.array(sigma_values, dtype=float)
+        mu = drift_annual
         drift_terms = np.array(
-            [drift_base - 0.5 * sigma * sigma for sigma in sigma_values],
+            [mu - 0.5 * sigma * sigma for sigma in sigma_values],
             dtype=float,
         ) * dt
         vol_terms = np.array([sigma * sqrt_dt for sigma in sigma_values], dtype=float)
@@ -238,7 +248,7 @@ def _run_simulation(cfg: SimConfig):
                 cfg.iv_fixed,
                 f"{cfg.iv_min}–{cfg.iv_max}",
                 cfg.mu_mode,
-                cfg.mu_custom,
+                drift_annual,
                 f"${cfg.entry_price:.2f}",
                 cfg.strike,
                 f"${cfg.target_profit:.0f}",

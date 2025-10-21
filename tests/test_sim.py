@@ -207,3 +207,36 @@ def test_summary_matches_detail_statistics():
     expected_days = max(int(round(cfg.dte_calendar * (cfg.annual_trading_days / 365.0))), 1)
     assert runtime.get("num_trials") == cfg.num_trials
     assert runtime.get("trading_days") == expected_days
+
+
+@pytest.mark.parametrize(
+    ("mu_mode", "mu_custom", "expected_drift"),
+    [
+        ("risk_neutral", 0.33, 0.02),
+        ("custom", 0.42, 0.42),
+    ],
+)
+def test_summary_reports_resolved_drift(deterministic_rng, mu_mode, mu_custom, expected_drift):
+    cfg = SimConfig(
+        option_type="call",
+        dte_calendar=5,
+        num_trials=1,
+        seed=123,
+        iv_mode="fixed",
+        iv_fixed=0.2,
+        entry_price=5.0,
+        commission_per_side=0.0,
+        target_profit=10.0,
+        stop_option_price=0.01,
+        contract_multiplier=1,
+        strike=100.0,
+        spot=101.0,
+        mu_mode=mu_mode,
+        mu_custom=mu_custom,
+    )
+
+    summary, _ = sim_module.simulate(cfg)
+    summary_map = {row["Metric"]: row["Value"] for _, row in summary.iterrows()}
+
+    assert summary_map["Drift Mode"] == mu_mode
+    assert summary_map["Drift (annual)"] == pytest.approx(expected_drift)

@@ -4,29 +4,12 @@ import types
 
 import pytest
 
-pytestmark = pytest.mark.mathstack
-
 mpmath_stub = types.ModuleType("mpmath")
 mpmath_stub.erfc = math.erfc
 sys.modules.setdefault("mpmath", mpmath_stub)
 
 np = pytest.importorskip("numpy")
 pytest.importorskip("pandas")
-
-_rng_factory = getattr(getattr(np, "random", None), "default_rng", None)
-if _rng_factory is None:
-    pytest.skip("mathstack tests require numpy.random.default_rng", allow_module_level=True)
-
-try:
-    _rng_probe = _rng_factory()
-except Exception:  # pragma: no cover - guard against broken RNG backends
-    pytest.skip("mathstack tests require a working numpy.random.default_rng", allow_module_level=True)
-
-if not hasattr(_rng_probe, "standard_normal"):
-    pytest.skip(
-        "mathstack tests require numpy.random.default_rng with standard_normal support",
-        allow_module_level=True,
-    )
 
 from gld_mc.config import SimConfig
 from gld_mc import sim as sim_module

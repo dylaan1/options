@@ -84,6 +84,7 @@ def _run_simulation(cfg: SimConfig):
         sigmas = rng.uniform(cfg.iv_min, cfg.iv_max, size=cfg.num_trials)
 
     drift_base = cfg.risk_free_rate if cfg.mu_mode == "risk_neutral" else cfg.mu_custom
+    drift_annual = drift_base
 
     sigma_values = [float(s) for s in sigmas] if cfg.num_trials else []
     if cfg.num_trials:
@@ -238,7 +239,7 @@ def _run_simulation(cfg: SimConfig):
                 cfg.iv_fixed,
                 f"{cfg.iv_min}–{cfg.iv_max}",
                 cfg.mu_mode,
-                cfg.mu_custom,
+                drift_annual,
                 f"${cfg.entry_price:.2f}",
                 cfg.strike,
                 f"${cfg.target_profit:.0f}",

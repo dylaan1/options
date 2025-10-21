@@ -1,11 +1,26 @@
 from __future__ import annotations
+
+import math
 import numpy as np
-from mpmath import erfc
+
+
+def _vectorized_erfc(x: np.ndarray) -> np.ndarray:
+    """Return ``erfc`` for ``x`` supporting both scalars and ndarrays."""
+
+    if hasattr(np, "erfc"):
+        return np.erfc(x)
+
+    # ``math.erfc`` handles scalars only; ``np.vectorize`` lifts it to arrays
+    # while remaining compatible with scalar inputs for callers that pass
+    # floats. This branch is exercised in minimal environments such as the test
+    # suite where NumPy may be stubbed out.
+    return np.vectorize(math.erfc)(x)  # pragma: no cover - fallback path
+
 
 def norm_cdf(x):
-    """Standard normal CDF (vectorized) via erfc."""
+    """Standard normal CDF for scalars or numpy arrays."""
     x = np.asarray(x, dtype=float)
-    return 0.5 * erfc(-x / np.sqrt(2))
+    return 0.5 * _vectorized_erfc(-x / np.sqrt(2))
 
 def black_scholes_call(S, K, T, r, sigma):
     """

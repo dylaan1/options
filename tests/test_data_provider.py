@@ -87,6 +87,11 @@ except Exception:  # pragma: no cover - fallback for constrained environments
                 return loc
             return [loc for _ in range(size)]
 
+        def standard_normal(self, size=None):  # pragma: no cover - parity stub
+            if size is None:
+                return 0.0
+            return [0.0 for _ in range(size)]
+
     def _default_rng(seed=None):  # noqa: D401 - simple stub
         return _DummyRNG()
 
@@ -99,7 +104,14 @@ except Exception:  # pragma: no cover - fallback for constrained environments
 
     class _Array:
         def __init__(self, data):
-            self._data = data
+            if isinstance(data, _Array):
+                self._data = list(data._data)
+            elif isinstance(data, list):
+                self._data = list(data)
+            elif isinstance(data, tuple):
+                self._data = list(data)
+            else:
+                self._data = [data]
 
         def __iter__(self):
             return iter(self._data)
@@ -187,7 +199,13 @@ except Exception:  # pragma: no cover - fallback for constrained environments
             return list(self._data)
 
     def _ensure_array(data):
-        return data if isinstance(data, _Array) else _Array(data)
+        if isinstance(data, _Array):
+            return data
+        if isinstance(data, list):
+            return _Array(data)
+        if isinstance(data, tuple):
+            return _Array(list(data))
+        return _Array([data])
 
     def _value_for_dtype(value, dtype):
         if dtype is bool:
@@ -217,10 +235,51 @@ except Exception:  # pragma: no cover - fallback for constrained environments
 
     def _array(values, dtype=float):
         if isinstance(values, _Array):
-            data = values._data
-        else:
+            data = list(values._data)
+        elif isinstance(values, (list, tuple)):
             data = list(values)
-        return _Array([_value_for_dtype(v, dtype) for v in data])
+        else:
+            try:
+                data = list(values)
+            except TypeError:
+                return _value_for_dtype(values, dtype)
+
+        converted = []
+        for element in data:
+            if isinstance(element, _Array):
+                converted.append([
+                    _value_for_dtype(item, dtype)
+                    for item in element._data
+                ])
+            elif isinstance(element, (list, tuple)):
+                converted.append([
+                    _value_for_dtype(item, dtype)
+                    for item in element
+                ])
+            else:
+                converted.append(_value_for_dtype(element, dtype))
+        return _Array(converted)
+
+    def _asarray(values, dtype=float):
+        target_dtype = float if dtype is None else dtype
+        try:
+            result = _array(values, target_dtype)
+        except Exception:  # pragma: no cover - fallback for heterogeneous data
+            if dtype is None:
+                target_dtype = object
+                result = _array(values, target_dtype)
+            else:
+                raise
+        if isinstance(result, _Array):
+            return result
+        return _value_for_dtype(result, target_dtype)
+
+    def _apply_unary(value, func):
+        if isinstance(value, _Array):
+            return _Array([func(v) for v in value._data])
+        if isinstance(value, (list, tuple)):
+            return _Array([func(v) for v in value])
+        return func(value)
 
     def _stack_rows(rows, selector):
         if isinstance(selector, slice):
@@ -242,8 +301,14 @@ except Exception:  # pragma: no cover - fallback for constrained environments
 
     def _percentile(array, qs):
         data = sorted(_ensure_array(array)._data)
+        if isinstance(qs, (int, float)):
+            qs_iter = [qs]
+            single = True
+        else:
+            qs_iter = qs
+            single = False
         results = []
-        for q in qs:
+        for q in qs_iter:
             if not data:
                 results.append(float("nan"))
                 continue
@@ -252,6 +317,8 @@ except Exception:  # pragma: no cover - fallback for constrained environments
             upper = min(lower + 1, len(data) - 1)
             weight = rank - lower
             results.append(data[lower] * (1 - weight) + data[upper] * weight)
+        if single:
+            return results[0]
         return results
 
     def _median(array):
@@ -267,7 +334,10 @@ except Exception:  # pragma: no cover - fallback for constrained environments
         arr_a = _ensure_array(a)
         if isinstance(b, _Array):
             return _Array([max(x, y) for x, y in zip(arr_a._data, b._data)])
-        return _Array([max(x, b) for x in arr_a._data])
+        result = [max(x, b) for x in arr_a._data]
+        if len(result) == 1:
+            return result[0]
+        return _Array(result)
 
     def _where(condition, x, y):
         if isinstance(condition, bool):
@@ -285,17 +355,47 @@ except Exception:  # pragma: no cover - fallback for constrained environments
             xv if mask else yv
             for mask, xv, yv in zip(cond._data, x_vals, y_vals)
         ]
+        if len(result) == 1:
+            return result[0]
         return _Array(result)
 
+    def _sqrt(value):
+        return _apply_unary(value, math.sqrt)
+
+    def _log(value):
+        return _apply_unary(value, math.log)
+
+    def _exp(value):
+        return _apply_unary(value, math.exp)
+
+    def _erfc(value):
+        return _apply_unary(value, math.erfc)
+
+    def _vectorize(func):
+        def _wrapped(values):
+            return _apply_unary(values, func)
+
+        return _wrapped
+
     def _any(array):
-        return any(_ensure_array(array)._data)
+        if isinstance(array, _Series):
+            data = array._data
+        else:
+            data = _ensure_array(array)._data
+        return any(data)
 
     numpy_stub = types.ModuleType("numpy")
     numpy_stub.random = types.SimpleNamespace(default_rng=_default_rng)
     numpy_stub.linspace = _linspace
+    numpy_stub.asarray = _asarray
     numpy_stub.full = lambda shape, fill_value, dtype=float: _create_array(shape, fill_value, dtype)
     numpy_stub.zeros = lambda shape, dtype=float: _create_array(shape, 0.0, dtype)
     numpy_stub.array = lambda values, dtype=float: _array(values, dtype)
+    numpy_stub.sqrt = _sqrt
+    numpy_stub.log = _log
+    numpy_stub.exp = _exp
+    numpy_stub.erfc = _erfc
+    numpy_stub.vectorize = _vectorize
     numpy_stub.percentile = _percentile
     numpy_stub.median = _median
     numpy_stub.mean = _mean
@@ -324,8 +424,37 @@ except Exception:  # pragma: no cover - fallback for constrained environments
         def __eq__(self, other):
             return _Series(value == other for value in self._data)
 
+        def _binary_op(self, other, op):
+            if isinstance(other, _Series):
+                return _Series(op(a, b) for a, b in zip(self._data, other._data))
+            return _Series(op(a, other) for a in self._data)
+
+        def __gt__(self, other):
+            return self._binary_op(other, lambda a, b: a > b)
+
+        def __ge__(self, other):
+            return self._binary_op(other, lambda a, b: a >= b)
+
+        def __lt__(self, other):
+            return self._binary_op(other, lambda a, b: a < b)
+
+        def __le__(self, other):
+            return self._binary_op(other, lambda a, b: a <= b)
+
         def to_list(self):
             return list(self._data)
+
+        def to_numpy(self, dtype=None):
+            return _asarray(self._data, dtype=dtype)
+
+        def mean(self):
+            if not self._data:
+                return 0.0
+            total = sum(self._data)
+            try:
+                return total / len(self._data)
+            except Exception:  # pragma: no cover - safeguard for non-numeric data
+                return 0.0
 
     class _DataFrame:
         def __init__(self, rows):
@@ -354,6 +483,7 @@ except Exception:  # pragma: no cover - fallback for constrained environments
                 self._rows = [dict(row) for row in rows]
             self.attrs = {}
             self.iloc = _ILoc(self)
+            self.loc = _Loc(self)
 
         def sort_values(self, key):
             return _DataFrame(sorted(self._rows, key=lambda row: row.get(key)))
@@ -379,12 +509,48 @@ except Exception:  # pragma: no cover - fallback for constrained environments
                 )
             raise TypeError(f"Unsupported key type: {type(key)!r}")
 
+        def iterrows(self):
+            for idx, row in enumerate(self._rows):
+                yield idx, row
+
     class _ILoc:
         def __init__(self, df: "_DataFrame") -> None:
             self._df = df
 
         def __getitem__(self, index):
             return self._df._rows[index]
+
+    class _Loc:
+        def __init__(self, df: "_DataFrame") -> None:
+            self._df = df
+
+        def __getitem__(self, key):
+            if not isinstance(key, tuple) or len(key) != 2:
+                raise TypeError("loc expects (rows, columns)")
+            row_sel, col_sel = key
+            if isinstance(row_sel, _Series):
+                mask = [bool(value) for value in row_sel]
+            elif isinstance(row_sel, (list, tuple)):
+                mask = [bool(value) for value in row_sel]
+            else:
+                raise TypeError("Unsupported row selector for loc")
+
+            filtered = [
+                row
+                for row, include in zip(self._df._rows, mask)
+                if include
+            ]
+
+            if isinstance(col_sel, str):
+                return _Series(row.get(col_sel) for row in filtered)
+            if isinstance(col_sel, (list, tuple)):
+                return _DataFrame(
+                    [
+                        {key: row.get(key) for key in col_sel}
+                        for row in filtered
+                    ]
+                )
+            return _DataFrame(filtered)
 
     pandas_stub = types.ModuleType("pandas")
     pandas_stub.DataFrame = _DataFrame

@@ -297,7 +297,7 @@ def _run_simulation(cfg: SimConfig):
         }
     )
 
-    return summary, details
+    return summary, details, trading_days
 
 
 def _run_vectorized_paths(
